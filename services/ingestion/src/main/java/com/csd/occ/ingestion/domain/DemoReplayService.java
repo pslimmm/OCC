@@ -67,42 +67,26 @@ public class DemoReplayService {
 
     @Transactional
     public DemoRun start(DemoRunConfiguration configuration, String actorSubject) {
+        if (configuration.scenario() == DemoScenario.ROADWORKS_BUNCHING)
+            throw new IllegalArgumentException("Select Normal or Bunching to start a simulation");
         if (runs.findActive().isPresent()) throw new IllegalStateException("A demo run is already active");
-        if (configuration.scenario() != DemoScenario.BUNCHING
+        if (configuration.scenario() == DemoScenario.NORMAL
                 && configuration.busGaps().stream().anyMatch(gap -> gap.compareTo(settings.bunchingThreshold()) <= 0))
             throw new IllegalArgumentException("Every starting gap must be above the bunching threshold");
-        boolean roadworks = configuration.scenario() == DemoScenario.ROADWORKS_BUNCHING;
-        if (roadworks && (!"190".equals(configuration.serviceId()) || configuration.directionId() != 1
-                || !DemoHazardScenario.ROADWORKS_STOP_CODE.equals(configuration.monitoredStopCode())))
-            throw new IllegalArgumentException("Roadworks bunching uses Service 190 Direction 1 at Phoenix Stn (44141)");
-        if (roadworks && settings.bunchingThreshold().compareTo(Duration.ofSeconds(DemoReplayScenario.ROADWORKS_HEADWAY_SECONDS)) <= 0)
-            throw new IllegalArgumentException("Roadworks bunching requires a threshold above 15 seconds");
         validateInitialCaptains(configuration);
         var version = topology.activeVersion().orElseThrow(() -> new IllegalStateException("Demo requires active bus topology"));
         var route = topology.busRoute(version.id(), configuration.serviceId()).orElseThrow(() -> new IllegalArgumentException("Selected bus service is unavailable"));
-        var stops = route.operators().stream().flatMap(operator -> operator.directions().stream())
+        boolean validStop = route.operators().stream().flatMap(operator -> operator.directions().stream())
                 .filter(direction -> direction.directionId() == configuration.directionId())
-                .map(ReferenceTopologyPort.BusRouteDirection::stops)
-                .filter(direction -> direction.stream().anyMatch(stop -> stop.stopCode().equals(configuration.monitoredStopCode())))
-                .findFirst().orElseThrow(() -> new IllegalArgumentException("Selected stop is unavailable on this route direction"));
-        if (roadworks) validateWorksiteApproach(stops, configuration.monitoredStopCode());
+                .flatMap(direction -> direction.stops().stream())
+                .anyMatch(stop -> stop.stopCode().equals(configuration.monitoredStopCode()));
+        if (!validStop) throw new IllegalArgumentException("Selected stop is unavailable on this route direction");
         DemoRun run = runs.save(new DemoRun(UUID.randomUUID(), clock.instant(), settings.scenario(), settings.seed(), configuration));
         recordRunEvent(run, "SIMULATION_STARTED", "SUCCESS", "Simulation run started", actorSubject);
         String seed = Long.toString(settings.seed());
         assignments.saveAll(java.util.stream.IntStream.rangeClosed(1, configuration.busCount())
                 .mapToObj(number -> assignment(run.id(), configuration, seed, number)).toList());
         return run;
-    }
-
-    private void validateWorksiteApproach(List<ReferenceTopologyPort.BusRouteStop> stops, String monitoredStopCode) {
-        var stop = stops.stream().filter(candidate -> monitoredStopCode.equals(candidate.stopCode())).findFirst().orElseThrow();
-        int index = stops.indexOf(stop);
-        if (index == 0 || stop.latitude() == null || stop.longitude() == null)
-            throw new IllegalArgumentException("The roadworks scenario requires a mapped approach to Phoenix Stn");
-        var previous = stops.get(index - 1);
-        if (previous.latitude() == null || previous.longitude() == null || DemoRoutePositionService.distance(previous, stop)
-                < DemoReplayScenario.ROADWORKS_APPROACH_METRES + DemoReplayScenario.WORKSITE_TO_STOP_METRES)
-            throw new IllegalArgumentException("The roadworks scenario requires a mapped approach to Phoenix Stn");
     }
 
     @Transactional

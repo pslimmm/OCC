@@ -870,45 +870,51 @@ async function mockSimulationHazards(context: BrowserContext, options: { availab
   }
 }
 
-test('simulation hazard alerts arrive on Overview and are shown once per run', async ({ page, context }) => {
+test('simulation hazards use the standard incident popup and alert list', async ({ page, context }) => {
   await page.clock.install()
   await mockDashboard(context)
   let published = false
   await mockSimulationHazards(context, { available: () => published })
+  await context.route('**/api/v1/disruption/traffic-incidents?*', route => route.fulfill({ json: {
+    items: published ? [{ ...simulationHazardFixtures[2], id: 'demo-work-traffic-record', disruptionId: 'demo-roadwork',
+      incidentType: 'Roadwork', classification: 'SIMULATION', demoRunId: 'run-1' }] : [],
+    page: 0, totalItems: published ? 1 : 0, totalPages: published ? 1 : 0,
+  } }))
 
   const hazardResponse = (response: { url(): string }) => new URL(response.url()).pathname === '/api/v1/disruption/hazards'
   const initialHazards = page.waitForResponse(hazardResponse)
   await login(page)
   await initialHazards
-  const popup = page.getByRole('status', { name: 'Simulation hazard alerts', exact: true })
+  const popup = page.getByRole('alert').filter({ hasText: 'TRAFFIC HAZARD · INCIDENT NOTICE' })
   await expect(popup).toHaveCount(0)
 
   published = true
   await page.clock.fastForward(30_000)
   await expect(popup).toBeVisible()
-  await expect(popup.getByRole('heading', { name: 'Simulation hazard alerts', exact: true })).toBeVisible()
+  await expect(popup.getByRole('heading', { name: 'DEMO: Approved works', exact: true })).toBeVisible()
+  await expect(popup).toContainText('Status: Active Hazard · Simulation')
+  const headerAlerts = page.getByRole('button', { name: '3 incident alerts', exact: true })
+  await expect(headerAlerts).toBeVisible()
+  await popup.getByRole('button', { name: 'View all (3)', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Incident & Hazard Alerts (3)', exact: true })
+  await expect(dialog).toBeVisible()
   for (const { title, description } of simulationHazardFixtures) {
-    await expect(popup).toContainText(title)
-    await expect(popup).toContainText(description)
-    await expect(popup.getByRole('button', { name: `Locate ${title} on map`, exact: true })).toBeVisible()
+    const entry = dialog.getByRole('article').filter({ hasText: title })
+    await expect(entry).toHaveCount(1)
+    await expect(entry).toContainText(description)
+    await expect(entry.getByRole('button', { name: 'Locate on map', exact: true })).toBeVisible()
   }
-  await expect(popup.getByRole('button', { name: /^Locate .* on map$/ })).toHaveCount(3)
-  await expect(popup).not.toContainText(/Older simulation|Off-route simulation|Cleared simulation alert|Live alert outside this run/)
+  await expect(dialog).not.toContainText(/Older simulation|Off-route simulation|Cleared simulation alert|Live alert outside this run/)
 
-  const planning = page.getByRole('link', { name: 'Planning & mitigation', exact: true })
-  await planning.click()
-  await expect(popup).toBeVisible()
-  const locateFlood = popup.getByRole('button', { name: 'Locate DEMO: Flood alert on map', exact: true })
-  await locateFlood.click()
+  await dialog.getByRole('article').filter({ hasText: 'DEMO: Flood alert' })
+    .getByRole('button', { name: 'Locate on map', exact: true }).click()
   await expect(page).toHaveURL(/\/controller\/disruptions\?hazard=demo-flood&service=190&direction=1/)
   await expect(page.getByRole('region', { name: 'Hazard details' })).toContainText('DEMO: Flood alert')
   const conditions = page.getByRole('region', { name: 'Hazard conditions', exact: true })
   await expect(conditions.locator('#hazard-demo-flood').getByRole('button', { name: 'Acknowledge', exact: true })).toBeVisible()
-  await planning.click()
-  await expect(popup).toBeVisible()
-  await expect(locateFlood).toHaveCount(0)
-  await expect(popup.getByRole('button', { name: /^Locate .* on map$/ })).toHaveCount(2)
-  await popup.getByRole('button', { name: 'Dismiss simulation hazard alerts', exact: true }).click()
+  await expect(headerAlerts).toBeVisible()
+  await expect(popup.getByRole('heading', { name: 'DEMO: BP6 disruption', exact: true })).toBeVisible()
+  await popup.getByRole('button', { name: 'Dismiss alert notice', exact: true }).click()
   await expect(popup).toHaveCount(0)
 
   const refreshedHazards = page.waitForResponse(hazardResponse)
@@ -925,6 +931,9 @@ test('simulation hazard alerts arrive on Overview and are shown once per run', a
     await expect(conditions.locator(`#hazard-${id}`).getByRole('button', { name: 'Acknowledge', exact: true })).toBeVisible()
   }
   await expect(popup).toHaveCount(0)
+  await headerAlerts.click()
+  await dialog.getByRole('button', { name: 'Acknowledge all incidents', exact: true }).first().click()
+  await expect(headerAlerts).toHaveCount(0)
 })
 
 test('Planning shows the current simulation hazards before and after diagnosis', async ({ page, context }) => {
@@ -953,8 +962,8 @@ test('Planning shows the current simulation hazards before and after diagnosis',
   })
 
   await login(page)
-  const popup = page.getByRole('status', { name: 'Simulation hazard alerts', exact: true })
-  await popup.getByRole('button', { name: 'Dismiss simulation hazard alerts', exact: true }).click()
+  const popup = page.getByRole('alert').filter({ hasText: 'TRAFFIC HAZARD · INCIDENT NOTICE' })
+  await popup.getByRole('button', { name: 'Acknowledge all (3)', exact: true }).click()
   await page.getByRole('link', { name: 'Planning & mitigation', exact: true }).click()
   await page.getByRole('listbox', { name: 'Recommendations awaiting a decision' }).getByRole('option')
     .filter({ hasText: 'Diagnosis has not been generated yet.' }).click()
@@ -977,6 +986,52 @@ test('Planning shows the current simulation hazards before and after diagnosis',
   await expect(map.getByRole('button', { name: /Hazard: Flood - DEMO: Flood alert/ })).toBeVisible()
   await expect(map.getByRole('button', { name: /Hazard: Rail Disruption - DEMO: BP6 disruption/ })).toBeVisible()
   await expect(map.getByRole('button', { name: /Hazard: Roadwork - DEMO: Approved works/ })).toBeVisible()
+})
+
+test('Disruptions maps current simulation hazards with the live categories and locates a hidden marker', async ({ page, context }) => {
+  await mockDashboard(context)
+  await mockSimulationHazards(context, { withExposures: () => false })
+  await context.route('**/api/v1/disruption/traffic-incidents?*', route => route.fulfill({ json: {
+    items: [
+      { id: 'duplicated-roadwork', disruptionId: 'demo-roadwork', classification: 'SIMULATION', demoRunId: 'run-1',
+        incidentType: 'Roadwork', message: 'Duplicate traffic feed roadwork', latitude: 1.378, longitude: 103.748 },
+      { id: 'live-incident', disruptionId: 'live-incident', classification: 'OBSERVATION_ONLY', demoRunId: null,
+        incidentType: 'Vehicle breakdown', message: 'Live vehicle breakdown', latitude: 1.382, longitude: 103.751 },
+    ], page: 0, size: 100, totalItems: 2, totalPages: 1,
+  } }))
+  await login(page, '/controller/disruptions')
+
+  const map = page.locator('#corridor-map')
+  const pins = map.getByRole('button', { name: /^Hazard:/ })
+  const roadwork = map.getByRole('button', { name: /Hazard: Roadwork - DEMO: Approved works/ })
+  const offRoute = map.getByRole('button', { name: /Hazard: Flood - Off-route simulation/ })
+  await expect(pins).toHaveCount(5)
+  await expect(roadwork).toHaveCount(1)
+  await expect.poll(() => pins.evaluateAll(elements => elements.every(element => {
+    const marker = element.getBoundingClientRect()
+    const viewport = (element as SVGElement).ownerSVGElement!.getBoundingClientRect()
+    return marker.left >= viewport.left && marker.right <= viewport.right && marker.top >= viewport.top && marker.bottom <= viewport.bottom
+  }))).toBe(true)
+  await expect(map.getByRole('button', { name: /Older simulation|Cleared simulation alert|Duplicate traffic feed roadwork/ })).toHaveCount(0)
+
+  await page.getByRole('button', { name: /^Svc 190 · to Stop C01/ }).click()
+  await expect(offRoute).toHaveCount(0)
+  await expect(roadwork).toHaveCount(1)
+
+  const roadworkFilter = map.getByTitle('Toggle Roadwork')
+  const trainFilter = map.getByTitle('Toggle Train')
+  await roadworkFilter.click()
+  await trainFilter.click()
+  await expect(roadwork).toHaveCount(0)
+  await expect(trainFilter).toHaveAttribute('aria-pressed', 'false')
+
+  const conditions = page.getByRole('region', { name: 'Hazard conditions', exact: true })
+  await conditions.locator('#hazard-demo-roadwork').getByRole('button', { name: 'Locate on map', exact: true }).press('Enter')
+  await expect(roadwork).toHaveAttribute('aria-pressed', 'true')
+  await expect(roadwork).toBeInViewport()
+  await expect(roadworkFilter).toHaveAttribute('aria-pressed', 'true')
+  await expect(trainFilter).toHaveAttribute('aria-pressed', 'false')
+  await expect(map.getByRole('region', { name: 'Hazard details', exact: true })).toContainText('DEMO: Approved works')
 })
 
 test('planning service search hides linked case details and actions when nothing matches', async ({ page, context }) => {
@@ -1042,7 +1097,7 @@ test('early controller suggestions show identified bus registrations, not observ
 
 test('controller switches the shared backend mode from the dashboard without leaving the page', async ({ page, context }) => {
   await mockDashboard(context)
-  const simulation = { id: 'run-1', status: 'REPLAY_COMPLETE', serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 120, busGapsSeconds: [120, 120, 120], monitoredStopCode: '44141', scenario: 'ROADWORKS_BUNCHING', alerts: [{ eventId: 'event-1', action: 'OPENED', classification: 'SIMULATION', serviceId: '190', stopCode: 'B01', detectedAt: '2026-10-22T01:00:00Z' }] }
+  const simulation = { id: 'run-1', status: 'REPLAY_COMPLETE', serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 90, busGapsSeconds: [90, 90, 90], monitoredStopCode: 'B01', scenario: 'BUNCHING', alerts: [{ eventId: 'event-1', action: 'OPENED', classification: 'SIMULATION', serviceId: '190', stopCode: 'B01', detectedAt: '2026-10-22T01:00:00Z' }] }
   let active = false
   let starts = 0
   let closes = 0
@@ -1060,7 +1115,7 @@ test('controller switches the shared backend mode from the dashboard without lea
   await context.route('**/api/v1/demo-runs', route => {
     expect(route.request().method()).toBe('POST')
     expect(route.request().headers().authorization).toMatch(/^Bearer /)
-    expect(route.request().postDataJSON()).toEqual({ serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 120, busGapsSeconds: [120, 120, 120], monitoredStopCode: '44141', scenario: 'ROADWORKS_BUNCHING', captainUserIds: ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004'] })
+    expect(route.request().postDataJSON()).toEqual({ serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 90, busGapsSeconds: [90, 90, 90], monitoredStopCode: 'B01', scenario: 'BUNCHING', captainUserIds: ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004'] })
     active = true; starts++
     return route.fulfill({ status: 201, json: simulation })
   })
@@ -1077,9 +1132,11 @@ test('controller switches the shared backend mode from the dashboard without lea
   } }))
   await login(page)
   await page.getByRole('button', { name: 'Start simulation', exact: true }).click()
-  await expect(page.getByRole('radio', { name: 'Roadworks-induced bunching' })).toBeChecked()
-  await expect(page.getByLabel('Injection stop')).toHaveValue('Phoenix Stn (44141)')
-  await expect(page.getByLabel('Injection stop')).toBeDisabled()
+  await expect(page.getByRole('radio', { name: 'Bunching', exact: true })).toBeChecked()
+  await expect(page.getByRole('dialog').getByRole('radio')).toHaveCount(2)
+  await expect(page.getByLabel('Route', { exact: true })).toBeEnabled()
+  await expect(page.getByLabel('Direction', { exact: true })).toBeEnabled()
+  await page.getByLabel('Injection stop').selectOption('B01')
   await page.getByLabel('Buses in this injection').fill('4')
   await page.getByLabel('Search available captains').fill('Captain')
   for (let index = 0; index < captainIds.length; index++) {
@@ -3593,6 +3650,56 @@ async function mockDisruptionControls(context: BrowserContext) {
     ], page: 0, totalItems: 2, totalPages: 1,
   } }))
 }
+
+test('Live incident badge retains all unacknowledged reports when the popup is dismissed or located', async ({ page, context }) => {
+  await mockAuth(context, 'CONTROLLER')
+  await context.route('https://www.onemap.gov.sg/maps/tiles/**', route => route.abort())
+  const reports = ['Roadwork', 'Accident', 'Vehicle breakdown'].map((incidentType, index) => ({
+    id: `live-report-${index}`, disruptionId: `live-hazard-${index}`, classification: 'OBSERVATION_ONLY',
+    incidentType, message: `Nearby live report ${index + 1}`, latitude: 1.39, longitude: 103.75,
+    observedAt: '2026-10-25T04:00:00Z',
+  }))
+  let published = 1
+  await context.route('**/api/v1/disruption/traffic-incidents?*', route => {
+    const index = Number(new URL(route.request().url()).searchParams.get('page'))
+    return route.fulfill({ json: {
+      items: reports.slice(0, published).slice(index * 2, (index + 1) * 2),
+      page: index, totalItems: published, totalPages: Math.ceil(published / 2),
+    } })
+  })
+
+  await login(page, '/controller/captains')
+  const header = page.locator('header')
+  await expect(header.getByRole('button', { name: '1 incident alert', exact: true })).toBeVisible()
+  const popup = page.getByRole('alert').filter({ hasText: 'TRAFFIC HAZARD · INCIDENT NOTICE' })
+  await expect(popup).toHaveCount(0)
+  published = 3
+  await header.getByRole('button', { name: 'Refresh', exact: true }).click()
+  const badge = header.getByRole('button', { name: '3 incident alerts', exact: true })
+  await expect(badge).toBeVisible()
+  await expect(badge).toHaveClass(/border-rose-500/)
+  await expect(popup.getByRole('heading', { name: 'Accident Reported', exact: true })).toBeVisible()
+  await popup.getByRole('button', { name: 'Dismiss alert notice', exact: true }).click()
+  await expect(popup).toHaveCount(0)
+  await expect(badge).toBeVisible()
+  await page.reload()
+  await expect(badge).toBeVisible()
+  await expect(popup).toHaveCount(0)
+
+  await badge.click()
+  const dialog = page.getByRole('dialog', { name: /^Incident & Hazard Alerts/ })
+  await expect(dialog.getByRole('article')).toHaveCount(3)
+  const accident = dialog.getByRole('article').filter({ hasText: 'Nearby live report 2' })
+  await accident.getByRole('button', { name: 'Locate on map', exact: true }).click()
+  await expect(page).toHaveURL(/\/controller\/disruptions\?hazard=live-hazard-1/)
+  await expect(badge).toBeVisible()
+  await badge.click()
+  await expect(dialog.getByRole('article')).toHaveCount(3)
+  await accident.getByRole('button', { name: 'Acknowledge', exact: true }).click()
+  await expect(dialog.getByRole('article')).toHaveCount(2)
+  await dialog.getByRole('button', { name: 'Close', exact: true }).last().click()
+  await expect(header.getByRole('button', { name: '2 incident alerts', exact: true })).toBeVisible()
+})
 
 test('Disruptions restores the map from Flat and locates a hazard missing from the filtered list', async ({ page, context }) => {
   await mockDisruptionControls(context)

@@ -55,7 +55,7 @@ class RootCauseContextServiceTest {
     }
 
     @Test
-    void simulationContextIncludesTheLatestApplicableRouteHazardsAtConfirmation() {
+    void regularSimulationContextIncludesOnlyLatestHazardsAtTheMonitoredStop() {
         Instant at = now.minusSeconds(5);
         UUID runId = UUID.randomUUID();
         UUID reference = UUID.randomUUID();
@@ -63,17 +63,21 @@ class RootCauseContextServiceTest {
         when(runs.findById(runId)).thenReturn(Optional.of(new DemoRun(runId, now.minusSeconds(100), "bunching-v1", 1)));
         var first = arrival("SIMULATION", runId);
         var second = arrival("SIMULATION", runId);
+        when(first.getStopCode()).thenReturn("44251");
+        when(second.getStopCode()).thenReturn("44251");
         when(first.getReferenceVersionId()).thenReturn(reference);
         when(second.getReferenceVersionId()).thenReturn(reference);
         var ids = List.of(first.getId(), second.getId());
         when(arrivals.findAllById(ids)).thenReturn(List.of(first, second));
 
-        var facts = DemoHazardScenario.observations(1, now.minusSeconds(100), at);
+        var monitoredStop = new ReferenceTopologyPort.BusStop("44251", "Bt Panjang Rd", "Bt Panjang Stn/Blk 604",
+                new BigDecimal("1.3803008"), new BigDecimal("103.7623167"));
+        var facts = DemoHazardScenario.observations(DemoScenario.BUNCHING, 1, now.minusSeconds(100), at,
+                monitoredStop.stopCode(), monitoredStop);
         var flood = hazard(runId, facts.get(0), at);
         var rail = hazard(runId, facts.get(1), at);
         var works = hazard(runId, facts.get(2), at);
-        var previousFlood = hazard(runId, DemoHazardScenario.observations(0, now.minusSeconds(100), at.minusSeconds(30)).getFirst(),
-                at.minusSeconds(30));
+        var previousWorks = hazard(runId, facts.getLast(), at.minusSeconds(30));
         var expired = hazard(runId, new HazardFeedPort.Fact(HazardKind.ROADWORKS, "expired", "OBSERVED", null,
                 at.minusSeconds(20), at, "Expired works", null, null, null, List.of(),
                 null, null, null, null, facts.get(2).locations()), at.minusSeconds(20));
@@ -81,27 +85,28 @@ class RootCauseContextServiceTest {
                 null, null, "Unrelated works", null, null, null, List.of(), null, null, null, null,
                 List.of(new HazardLocation("ROAD", "Other Road", "Other Road", null, null, null, "ROAD_NAME", "PROVIDER_SUPPLIED"))), at);
         when(hazards.findByDemoRunIdAndClassificationAndFetchedAtLessThanEqualOrderByFetchedAtDescIdAsc(runId, "SIMULATION", at))
-                .thenReturn(List.of(flood, rail, works, otherDirection, expired, previousFlood));
+                .thenReturn(List.of(flood, rail, works, otherDirection, expired, previousWorks));
 
         var selectedDirection = new ReferenceTopologyPort.BusRouteDirection(1, List.of(
-                new ReferenceTopologyPort.BusRouteStop("44009", " BT  Panjang Rd ", "Near flood", new BigDecimal("1.3803"),
-                        new BigDecimal("103.7551"), 1, BigDecimal.ZERO),
-                new ReferenceTopologyPort.BusRouteStop("44010", "Nearby Road", "Near BP6", new BigDecimal("1.3786"),
-                        new BigDecimal("103.7618"), 2, BigDecimal.ONE)));
+                new ReferenceTopologyPort.BusRouteStop(monitoredStop.stopCode(), monitoredStop.roadName(),
+                        monitoredStop.description(), monitoredStop.latitude(), monitoredStop.longitude(), 8, new BigDecimal("3.10")),
+                new ReferenceTopologyPort.BusRouteStop("44231", "Bt Panjang Rd", "Zhenghua Pr Sch", new BigDecimal("1.3791669"),
+                        new BigDecimal("103.7693349"), 10, new BigDecimal("4.00")),
+                new ReferenceTopologyPort.BusRouteStop("44261", "Bt Panjang Rd", "Blk 270", new BigDecimal("1.3760822"),
+                        new BigDecimal("103.7742778"), 11, new BigDecimal("4.70"))));
         var oppositeDirection = new ReferenceTopologyPort.BusRouteDirection(2, List.of(
                 new ReferenceTopologyPort.BusRouteStop("44011", "Other Road", "Other Stop", BigDecimal.ZERO, BigDecimal.ZERO,
                         1, BigDecimal.ZERO)));
         when(topology.busRoute(reference, "190")).thenReturn(Optional.of(new ReferenceTopologyPort.BusRoute("190",
                 List.of(new ReferenceTopologyPort.BusRouteOperator("SMRT", "TRUNK", List.of(selectedDirection, oppositeDirection))))));
 
-        var context = service.find(runId, at, "190", "44009", 1, ids);
+        var context = service.find(runId, at, "190", monitoredStop.stopCode(), 1, ids);
 
         assertThat(context.missingFields()).doesNotContain("traffic-incidents");
         assertThat(context.incidents()).extracting(RootCauseContextSnapshot.RootCauseIncident::evidenceId)
-                .containsExactly("hazard-observation:" + flood.id(), "hazard-observation:" + rail.id(),
-                        "hazard-observation:" + works.id());
+                .containsExactly("hazard-observation:" + works.id());
         assertThat(context.incidents()).extracting(RootCauseContextSnapshot.RootCauseIncident::incidentType)
-                .containsExactly("FLOOD", "RAIL_DISRUPTION", "ROADWORKS");
+                .containsExactly("ROADWORKS");
         assertThat(context.incidents().getLast().observedAt()).isNull();
         assertThat(context.incidents().getLast().message()).contains("Bt Panjang Rd");
         assertThat(context.simulationDelay()).isNull();

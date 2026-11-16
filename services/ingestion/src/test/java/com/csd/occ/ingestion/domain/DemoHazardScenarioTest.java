@@ -1,7 +1,9 @@
 package com.csd.occ.ingestion.domain;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
@@ -27,7 +29,28 @@ class DemoHazardScenarioTest {
     }
 
     @Test
-    void roadworksScenarioPlacesHazardsAtThreeSeparatePartsOfTheRoute() {
+    void regularScenariosPlaceRoadworksAtTheSelectedStopAndOtherHazardsFartherAway() {
+        var stop = new ReferenceTopologyPort.BusStop("44251", "Bt Panjang Rd", "Bt Panjang Stn/Blk 604",
+                new BigDecimal("1.3803008"), new BigDecimal("103.7623167"));
+        for (var scenario : List.of(DemoScenario.NORMAL, DemoScenario.BUNCHING)) {
+            var facts = DemoHazardScenario.observations(scenario, 0, Instant.EPOCH, Instant.EPOCH, stop.stopCode(), stop);
+            var flood = facts.getFirst().locations().getFirst();
+            var station = facts.get(1).locations().getFirst();
+            var works = facts.getLast().locations().getFirst();
+
+            assertThat(works.sourceReference()).isEqualTo(stop.stopCode());
+            assertThat(works.geometryRole()).isEqualTo("WORKSITE");
+            assertThat(works.latitude()).isEqualTo(stop.latitude());
+            assertThat(works.longitude()).isEqualTo(stop.longitude());
+            assertThat(station.sourceReference()).isEqualTo("BP9");
+            assertThat(station.longitude().subtract(works.longitude())).isGreaterThan(new BigDecimal("0.01"));
+            assertThat(flood.description()).contains("Blk 270");
+            assertThat(flood.longitude().subtract(works.longitude())).isGreaterThan(new BigDecimal("0.01"));
+        }
+    }
+
+    @Test
+    void retainedRoadworksScenarioKeepsItsRecordedLocations() {
         var facts = DemoHazardScenario.observations(DemoScenario.ROADWORKS_BUNCHING, 0, Instant.EPOCH, Instant.EPOCH);
         var flood = facts.getFirst().locations().getFirst();
         var station = facts.get(1).locations().getFirst();

@@ -30,8 +30,8 @@ public class RootCauseContextController {
     @GetMapping("/demo-runs/{demoRunId}/planning-context")
     @Operation(operationId = "getSimulationPlanningContext", summary = "Get simulation evidence for a confirmed event",
             description = "Includes the latest active scenario hazard observations as of the evidence time when their location "
-                    + "matches the bus route and direction. These incident entries have hazard-observation evidence IDs. "
-                    + "The roadworks preset can include verified before/after forecasts for its first bus pair.")
+                    + "matches the monitored stop. These incident entries have hazard-observation evidence IDs. "
+                    + "Previously saved roadworks runs retain their route context and may include recorded before and after forecasts.")
     @ApiResponse(responseCode = "200", description = "Simulation-scoped evidence context")
     @ApiResponse(responseCode = "400", description = "Evidence observations do not match the simulation event",
             content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,

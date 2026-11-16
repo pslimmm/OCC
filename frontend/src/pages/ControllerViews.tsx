@@ -459,7 +459,8 @@ export function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: n
 
 export type HazardCategory = 'accident' | 'breakdown' | 'roadwork' | 'traffic' | 'flood' | 'rail' | 'other'
 
-export function categorizeHazard(hazard: { incidentType?: string | null; message?: string | null }): HazardCategory {
+export function categorizeHazard(hazard: { category?: HazardCategory; incidentType?: string | null; message?: string | null }): HazardCategory {
+  if (hazard.category) return hazard.category
   const text = `${hazard.incidentType ?? ''} ${hazard.message ?? ''}`.toLowerCase()
   if (text.includes('accident') || text.includes('collision') || text.includes('crash')) return 'accident'
   if (text.includes('breakdown') || text.includes('broken down') || text.includes('stalled')) return 'breakdown'
@@ -775,15 +776,15 @@ export function BunchingMap({
     }]
   }), [filteredBuses, routes, activeGeometries, simulationFleet])
 
-  const simulationHazardPoints = useMemo(() => simulationFleet
-    ? (hazards ?? []).filter(hazard => hazard.demoRunId && validCoord(hazard.latitude, hazard.longitude))
-    : [], [simulationFleet, hazards])
+  const simulationHazardPoints = useMemo(() =>
+    hazards.filter(hazard => hazard.demoRunId && validCoord(hazard.latitude, hazard.longitude)), [hazards])
 
   const corridorFocusPoints = useMemo(() => {
     if (isAllCorridors) {
       const pts: Array<{ latitude: number; longitude: number }> = [
         ...allStops.map(s => ({ latitude: s.latitude, longitude: s.longitude })),
         ...busMarkers.map(b => ({ latitude: b.latitude, longitude: b.longitude })),
+        ...simulationHazardPoints,
       ]
       return pts
     }
@@ -832,13 +833,6 @@ export function BunchingMap({
     setPrevSelectedId(selectedIncident?.id)
     if (!focusCoord) setManualView(null)
   }
-  if (prevFocusCoord !== focusCoord) {
-    setPrevFocusCoord(focusCoord)
-    if (focusCoord && validCoord(focusCoord.lat, focusCoord.lng)) {
-      setManualView({ center: focusCoord, zoom: 15 })
-    }
-  }
-
   const [localSelectedHazardId, setLocalSelectedHazardId] = useState<string | null>(null)
   const activeHazardId = selectedHazardId !== undefined ? selectedHazardId : localSelectedHazardId
 
@@ -861,6 +855,18 @@ export function BunchingMap({
   const [activeHazardTypes, setActiveHazardTypes] = useState<Set<HazardCategory>>(
     () => new Set(['breakdown', 'roadwork', 'accident', 'traffic', 'flood', 'rail', 'other'])
   )
+
+  if (prevFocusCoord !== focusCoord) {
+    setPrevFocusCoord(focusCoord)
+    if (focusCoord && validCoord(focusCoord.lat, focusCoord.lng)) {
+      setManualView({ center: focusCoord, zoom: 15 })
+      if (activeSelectedHazard) {
+        const category = categorizeHazard(activeSelectedHazard)
+        if (!showHazards) setShowHazards(true)
+        if (!activeHazardTypes.has(category)) setActiveHazardTypes(new Set([...activeHazardTypes, category]))
+      }
+    }
+  }
 
   const toggleHazardType = (cat: HazardCategory) => {
     setActiveHazardTypes(prev => {
@@ -1719,7 +1725,7 @@ export function BunchingMap({
         </svg>
 
         {activeSelectedHazard && (() => {
-          const activeCategory = activeSelectedHazard.category ?? categorizeHazard(activeSelectedHazard)
+          const activeCategory = categorizeHazard(activeSelectedHazard)
           return (
           <div
             role="region"
@@ -1969,6 +1975,7 @@ export function ControllerDisruptions({
   pollIntervalSeconds = 60,
   gapToleranceSeconds = 30,
   trafficIncidents = [],
+  simulationHazards = [],
   selectedHazardId,
   onSelectHazard,
   onLocateHazardInList,
@@ -1986,6 +1993,7 @@ export function ControllerDisruptions({
   pollIntervalSeconds?: number
   gapToleranceSeconds?: number
   trafficIncidents?: TrafficIncident[]
+  simulationHazards?: MapHazard[]
   selectedHazardId?: string | null
   onSelectHazard?: (hazardId: string | null) => void
   onLocateHazardInList?: (hazardId: string) => void
@@ -2417,45 +2425,40 @@ export function ControllerDisruptions({
   }
 
   const corridorHazards = useMemo<MapHazard[]>(() => {
-    const isLive = !run?.data
-    const currentDemoRunId = run?.data?.id
-    const valid = (trafficIncidents || []).filter(i => {
+    const currentDemoRunId = simulation?.id
+    const valid = trafficIncidents.filter(i => {
       if (!validCoord(i.latitude, i.longitude)) return false
-      if (isLive && (i.classification === 'SIMULATION' || i.demoRunId)) return false
-      if (!isLive && currentDemoRunId && i.demoRunId && i.demoRunId !== currentDemoRunId) return false
+      if (!currentDemoRunId && (i.classification === 'SIMULATION' || i.demoRunId)) return false
+      if (i.demoRunId && i.demoRunId !== currentDemoRunId) return false
       return true
     })
     const corridorStops = corridorRoutes.flatMap(r => r.stops).filter(s => validCoord(s.latitude, s.longitude))
-    const mapToHazard = (i: TrafficIncident): MapHazard => {
-      const nearestDistM = corridorStops.length > 0
-        ? Math.min(...corridorStops.map(s => distanceMeters(i.latitude!, i.longitude!, s.latitude!, s.longitude!)))
+    const mappedTraffic = valid.map((incident): MapHazard => ({
+      id: incident.id,
+      disruptionId: incident.disruptionId,
+      demoRunId: incident.demoRunId,
+      latitude: incident.latitude!,
+      longitude: incident.longitude!,
+      incidentType: incident.incidentType,
+      message: incident.message,
+      updatedAt: incident.updatedAt ?? incident.openedAt ?? incident.observedAt ?? undefined,
+    }))
+    const pins = new Map<string, MapHazard>()
+    for (const hazard of [...mappedTraffic, ...simulationHazards]) {
+      const distanceToCorridorM = corridorStops.length
+        ? Math.min(...corridorStops.map(stop => distanceMeters(hazard.latitude, hazard.longitude, stop.latitude!, stop.longitude!)))
         : undefined
-      return {
-        id: i.id,
-        disruptionId: i.disruptionId ?? undefined,
-        latitude: i.latitude!,
-        longitude: i.longitude!,
-        incidentType: i.incidentType,
-        message: i.message,
-        updatedAt: i.updatedAt ?? i.openedAt ?? i.observedAt ?? undefined,
-        distanceToCorridorM: nearestDistM,
+      const associated = `${hazard.serviceId}:${hazard.directionId}` === selectedCorridorKey
+      if (selectedCorridorKey === 'all' || associated || (distanceToCorridorM ?? Infinity) <= 2500) {
+        pins.set(hazard.disruptionId ?? hazard.id, { ...hazard, distanceToCorridorM })
       }
     }
-    const baseList: MapHazard[] = selectedCorridorKey === 'all'
-      ? valid.map(mapToHazard)
-      : !corridorStops.length
-        ? []
-        : valid
-            .filter(i => corridorStops.some(s => distanceMeters(i.latitude!, i.longitude!, s.latitude!, s.longitude!) <= 2500))
-            .map(mapToHazard)
     if (locatedHazard) {
-      return [
-        ...baseList.filter(h => h.id !== locatedHazard.id && h.disruptionId !== locatedHazard.id),
-        locatedHazard,
-      ]
+      const id = locatedHazard.disruptionId ?? locatedHazard.id
+      pins.set(id, { ...pins.get(id), ...locatedHazard })
     }
-    return baseList
-  }, [trafficIncidents, selectedCorridorKey, corridorRoutes, run, locatedHazard])
+    return [...pins.values()]
+  }, [trafficIncidents, simulationHazards, selectedCorridorKey, corridorRoutes, simulation?.id, locatedHazard])
 
   const showCorridorMap = viewMode === 'grouped' && (corridorRoutes.length > 0 || corridorHazards.length > 0)
   useEffect(() => {

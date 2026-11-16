@@ -84,8 +84,8 @@ public class RootCauseContextService {
         if (reference == null) missing.add("reference-version");
         if (referenceVersions.size() > 1) missing.add("mixed-reference-versions");
 
-        var scenarioHazards = runId != null && reference != null
-                ? scenarioHazards(runId, at, reference, serviceId, directionId, stopCode)
+        var scenarioHazards = run != null && reference != null
+                ? scenarioHazards(run, at, reference, serviceId, directionId, stopCode)
                 : List.<ScenarioIncident>of();
         List<TrafficIncidentObservation> scopedIncidents = runId == null
                 ? incidents.findByClassificationAndDemoRunIdIsNullAndFetchedAtBetweenOrderByFetchedAtDesc(
@@ -112,16 +112,18 @@ public class RootCauseContextService {
                 simulationDelay(run, found, worksite));
     }
 
-    private List<ScenarioIncident> scenarioHazards(UUID runId, Instant at,
+    private List<ScenarioIncident> scenarioHazards(DemoRun run, Instant at,
             UUID referenceVersionId, String serviceId, int directionId, String stopCode) {
         var observations = hazards.findByDemoRunIdAndClassificationAndFetchedAtLessThanEqualOrderByFetchedAtDescIdAsc(
-                runId, "SIMULATION", at);
+                run.id(), "SIMULATION", at);
         if (observations.isEmpty()) return List.of();
+        boolean legacyRoadworks = run.configuration().scenario() == DemoScenario.ROADWORKS_BUNCHING;
         var routeStops = topology.busRoute(referenceVersionId, serviceId).stream()
                 .flatMap(route -> route.operators().stream())
                 .flatMap(operator -> operator.directions().stream())
                 .filter(direction -> direction.directionId() == directionId)
                 .flatMap(direction -> direction.stops().stream())
+                .filter(stop -> legacyRoadworks || stopCode.equals(stop.stopCode()))
                 .toList();
         var seen = new HashSet<String>();
         return observations.stream()

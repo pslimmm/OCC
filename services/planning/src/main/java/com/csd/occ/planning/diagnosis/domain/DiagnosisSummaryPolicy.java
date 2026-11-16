@@ -77,8 +77,9 @@ public final class DiagnosisSummaryPolicy {
 
         String names = hazards.stream().filter(hazard -> !hazard.evidenceId().equals(explainedHazardId))
                 .map(DiagnosisSummaryPolicy::incidentName).distinct().collect(Collectors.joining(", "));
-        String context = names.isEmpty() ? "" : (explainedHazardId == null ? "Simulated hazards" : "Other simulated hazards")
-                + " along this route: " + names + ".";
+        String context = names.isEmpty() ? "" : explainedHazardId == null
+                ? "The diagnosis includes simulated incident evidence for " + names.toLowerCase(Locale.ROOT) + "."
+                : "Other simulated hazards along this route: " + names + ".";
         String text = context.isEmpty() ? summary.likelyCause()
                 : truncate(summary.likelyCause(), MAX_SUMMARY_LENGTH - context.length() - 1) + " " + context;
         return new Summary(text,

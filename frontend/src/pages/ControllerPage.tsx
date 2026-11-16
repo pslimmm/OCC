@@ -28,8 +28,8 @@ export type Planning = { recommendations: PageResult<PendingRecommendation> & { 
 type SimulationPositionSample = Resource<RoutePositions[]> & { runId: string; receivedAt: number }
 const empty = { data: null, error: '' }
 const dismissedAlertsKey = 'occ-dismissed-alert-ids'
-const dismissedSimulationNoticesKey = 'occ-dismissed-simulation-hazard-notices'
-const roadworksScenarioRoute = { serviceId: '190', directionId: 1, monitoredStopCode: '44141' }
+// Keep the existing per-tab notice preferences when live incidents use the same dismissal behavior.
+const dismissedIncidentNoticesKey = 'occ-dismissed-simulation-hazard-notices'
 
 function mapHazard(hazard: Hazard, latitude: number, longitude: number, context?: AdvisoryMapContext): MapHazard {
   const location = hazard.facts.locations?.find(point => point.latitude === latitude && point.longitude === longitude)
@@ -40,6 +40,7 @@ function mapHazard(hazard: Hazard, latitude: number, longitude: number, context?
     latitude,
     longitude,
     incidentType: hazard.kind === 'FLOOD' ? 'Flood' : hazard.kind === 'RAIL_DISRUPTION' ? 'Rail Disruption' : hazard.kind === 'ROADWORKS' ? 'Roadwork' : hazard.facts.title,
+    category: hazard.kind === 'FLOOD' ? 'flood' : hazard.kind === 'RAIL_DISRUPTION' ? 'rail' : hazard.kind === 'ROADWORKS' ? 'roadwork' : undefined,
     message: hazard.facts.description,
     title: hazard.facts.title,
     status: hazard.status,
@@ -187,6 +188,37 @@ function findNearestCorridorStop(
   return best
 }
 
+type IncidentAlert = {
+  hazard: MapHazard
+  nearest: ReturnType<typeof findNearestCorridorStop>
+  sourceId?: string
+}
+
+type PopupAlert = {
+  id: string
+  kind: 'bunching' | 'traffic'
+  title: string
+  subtitle: string
+  detail: string
+  serviceId?: string
+  directionId?: number | null
+  gapSeconds?: number | null
+  detectedAt?: string
+}
+
+function incidentPopup({ hazard, nearest }: IncidentAlert): PopupAlert {
+  return {
+    id: hazard.id,
+    kind: 'traffic',
+    title: hazard.title || `${hazard.incidentType || 'Traffic Hazard'} Reported`,
+    subtitle: hazard.hazardLocation || (nearest
+      ? `Near ${nearest.description || nearest.stopCode} (Service ${nearest.serviceId} corridor ~${nearest.distanceM}m away)`
+      : 'Corridor traffic disruption'),
+    detail: hazard.message || 'Traffic disruption reported along transit corridor.',
+    detectedAt: hazard.updatedAt,
+  }
+}
+
 export function ControllerPage({ email, token, controllerRefreshIntervalSeconds, ingestionPollIntervalSeconds,
   routeIncidentGapToleranceSeconds }: {
   email: string; token: string; controllerRefreshIntervalSeconds: number; ingestionPollIntervalSeconds: number
@@ -257,26 +289,14 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   const navigate = useNavigate()
   const [simulationDialogOpen, setSimulationDialogOpen] = useState(false)
   const [simulationStartError, setSimulationStartError] = useState('')
-  const [simulationConfig, setSimulationConfig] = useState({ ...roadworksScenarioRoute, busCount: 3,
-    dispatchGapSeconds: 120, busGapsSeconds: [120, 120], scenario: 'ROADWORKS_BUNCHING' as DemoRun['scenario'], captainUserIds: ['', '', ''] })
+  const [simulationConfig, setSimulationConfig] = useState({ serviceId: '190', directionId: 1, busCount: 3,
+    dispatchGapSeconds: 90, busGapsSeconds: [90, 90], monitoredStopCode: '44251',
+    scenario: 'BUNCHING' as 'NORMAL' | 'BUNCHING', captainUserIds: ['', '', ''] })
   const [directiveAlertOpen, setDirectiveAlertOpen] = useState(false)
   const [alertListModal, setAlertListModal] = useState<'bunching' | 'traffic' | null>(null)
   const [dismissedAlertIds, setDismissedAlertIds] = useState<Set<string>>(() => loadDismissedAlertIds())
-  const [dismissedSimulationNoticeIds, setDismissedSimulationNoticeIds] = useState(() => loadDismissedAlertIds(dismissedSimulationNoticesKey))
-  const [activeNewIncidentAlert, setActiveNewIncidentAlert] = useState<{
-    id: string
-    kind: 'bunching' | 'traffic'
-    title: string
-    subtitle: string
-    detail: string
-    severity?: 'critical' | 'warning'
-    serviceId?: string
-    directionId?: number | null
-    stopCode?: string
-    gapSeconds?: number | null
-    incidentType?: string
-    detectedAt?: string
-  } | null>(null)
+  const [dismissedIncidentNoticeIds, setDismissedIncidentNoticeIds] = useState(() => loadDismissedAlertIds(dismissedIncidentNoticesKey))
+  const [activeNewIncidentAlert, setActiveNewIncidentAlert] = useState<PopupAlert | null>(null)
   const knownAlertIdsRef = useRef<Set<string>>(new Set())
   const knownTrafficIdsRef = useRef<Set<string>>(new Set())
 
@@ -292,10 +312,10 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     setActiveNewIncidentAlert(current => (current?.id === id || (current?.id && id.split(':').includes(current.id)) ? null : current))
     setDirectiveAlertOpen(false)
   }, [setDirectiveAlertOpen])
-  const dismissSimulationNotices = (ids: string[]) => {
-    setDismissedSimulationNoticeIds(previous => {
-      const next = new Set([...previous, ...ids])
-      saveDismissedAlertIds(next, dismissedSimulationNoticesKey)
+  const dismissIncidentNotice = (id: string) => {
+    setDismissedIncidentNoticeIds(previous => {
+      const next = new Set([...previous, id])
+      saveDismissedAlertIds(next, dismissedIncidentNoticesKey)
       return next
     })
   }
@@ -362,7 +382,6 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   }, [livePositions, positionClock, showSimulatedMovement, simulation, simulationSample])
 
   const captainAssignmentInvalid = !captainSelectionIsValid(simulationConfig.captainUserIds, simulationConfig.busCount)
-  const roadworksScenario = simulationConfig.scenario === 'ROADWORKS_BUNCHING'
   const simulationDirections = routeStops.data?.filter(route => route.serviceId === simulationConfig.serviceId) ?? []
   const simulationStops = simulationDirections.find(route => route.directionId === simulationConfig.directionId)?.stops ?? []
   const wholeNumberBetween = (value: number, min: number, max: number) => Number.isInteger(value) && value >= min && value <= max
@@ -501,9 +520,14 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
         throw failure
       }
     },
-    incident => incident.id,
-    pathname === '/controller' || pathname.endsWith('/disruptions') || pathname.endsWith('/planning')
+    incident => incident.id, true, { preservePagesOnRefresh: true }
   )
+  const { hasMore: moreTraffic, isLoading: loadingTraffic, isLoadingMore: loadingMoreTraffic,
+    error: trafficError, loadNext: loadNextTraffic } = trafficIncidentCollection
+  const pendingTrafficPages = loadingTraffic || loadingMoreTraffic || (moreTraffic && !trafficError)
+  useEffect(() => {
+    if (moreTraffic && !loadingTraffic && !loadingMoreTraffic && !trafficError) loadNextTraffic()
+  }, [moreTraffic, loadingTraffic, loadingMoreTraffic, trafficError, loadNextTraffic])
   const simulationHazardsEnabled = scopeVerified && currentRunId !== null
   const simulationHazardCollection = usePagedCollection<Hazard, PageResult<Hazard>>(scopeKey, async (page, signal) => {
     try {
@@ -552,16 +576,24 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
       })] : []
     })
   }, [simulationHazardsEnabled, simulationServiceId, simulationDirectionId, currentRunId, routeStops.data, simulationHazardCollection.items])
-  const simulationHazardNotices = simulationMapHazards.filter(hazard => hazard.status === 'ACTIVE' &&
-    !dismissedAlertIds.has(hazard.id) && !dismissedSimulationNoticeIds.has(hazard.id))
+  const disruptionSimulationHazards = useMemo(() => {
+    if (pathname !== '/controller/disruptions' || !simulationHazardsEnabled) return []
+    const corridorHazards = new Map(simulationMapHazards.map(hazard => [hazard.id, hazard]))
+    return simulationHazardCollection.items.flatMap(hazard => {
+      if (hazard.classification !== 'SIMULATION' || hazard.demoRunId !== currentRunId || hazard.status === 'CLEARED') return []
+      const corridorHazard = corridorHazards.get(hazard.disruptionId)
+      if (corridorHazard) return [corridorHazard]
+      const location = hazard.facts.locations?.find(point => validCoord(point.latitude, point.longitude))
+      return location?.latitude != null && location.longitude != null ? [mapHazard(hazard, location.latitude, location.longitude)] : []
+    })
+  }, [pathname, simulationHazardsEnabled, currentRunId, simulationMapHazards, simulationHazardCollection.items])
   const currentAlerts = simulation ? simulation.alerts : alertCollection.items
   const currentTraffic: TrafficIncident[] = useMemo(() => {
-    return trafficIncidentCollection.items.filter((t: TrafficIncident) => {
-      if (!simulation && (t.classification === 'SIMULATION' || t.demoRunId)) return false
-      if (simulation && t.demoRunId && t.demoRunId !== simulation.id) return false
-      return true
+    return trafficIncidentCollection.items.filter(incident => {
+      if (incident.classification !== 'SIMULATION' && !incident.demoRunId) return true
+      return currentRunId !== null && incident.demoRunId === currentRunId
     })
-  }, [trafficIncidentCollection.items, simulation])
+  }, [trafficIncidentCollection.items, currentRunId])
 
   const pollIntervalSeconds = routePositions.data?.length
     ? Math.min(...routePositions.data.map(value => value.refreshIntervalSeconds)) : ingestionPollIntervalSeconds
@@ -587,33 +619,48 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     })
   }, [activeBunchingIncidents, dismissedAlertIds])
 
-  const awaitingTrafficIncidents = useMemo(() => {
+  const awaitingIncidentAlerts = useMemo(() => {
     const routes = routeStops.data ?? []
-    return currentTraffic.filter(t => {
-      if (dismissedAlertIds.has(t.id) || (t.disruptionId && dismissedAlertIds.has(t.disruptionId))) return false
-      if (routes.length > 0) {
-        return findNearestCorridorStop(t.latitude, t.longitude, routes, 2500) !== null
-      }
-      return Boolean(t.latitude && t.longitude)
-    })
-  }, [currentTraffic, routeStops.data, dismissedAlertIds])
+    const byId = new Map<string, IncidentAlert>()
+    for (const hazard of simulationMapHazards) {
+      if (hazard.status !== 'ACTIVE' || dismissedAlertIds.has(hazard.id)) continue
+      const corridor = routes.filter(route => route.serviceId === hazard.serviceId && route.directionId === hazard.directionId)
+      byId.set(hazard.id, { hazard, nearest: findNearestCorridorStop(hazard.latitude, hazard.longitude, corridor) })
+    }
+    for (const incident of currentTraffic) {
+      const id = incident.disruptionId || incident.id
+      if (byId.has(id) || dismissedAlertIds.has(id) || dismissedAlertIds.has(incident.id) ||
+          !validCoord(incident.latitude, incident.longitude)) continue
+      const nearest = findNearestCorridorStop(incident.latitude, incident.longitude, routes)
+      if (routes.length > 0 && !nearest) continue
+      byId.set(id, {
+        hazard: {
+          id, disruptionId: incident.disruptionId, demoRunId: incident.demoRunId,
+          latitude: incident.latitude!, longitude: incident.longitude!, incidentType: incident.incidentType,
+          message: incident.message, updatedAt: incident.observedAt ?? incident.updatedAt ?? undefined,
+        },
+        nearest, sourceId: incident.id,
+      })
+    }
+    const priority = ({ hazard }: IncidentAlert) => !hazard.demoRunId ? 2 : hazard.incidentType === 'Roadwork' ? 0 : 1
+    return Array.from(byId.values()).sort((first, second) => priority(first) - priority(second) ||
+      (first.hazard.demoRunId ? first.hazard.id.localeCompare(second.hazard.id) : 0))
+  }, [simulationMapHazards, currentTraffic, routeStops.data, dismissedAlertIds])
 
   const awaitingBunchingCount = awaitingBunchingIncidents.length
-  const awaitingIncidentCount = awaitingTrafficIncidents.length
+  const awaitingIncidentCount = awaitingIncidentAlerts.length
   const topActiveIncident = awaitingBunchingIncidents[0]
   const topAlertGap = topActiveIncident?.gapSeconds ?? (topActiveIncident?.alerts[0] ? bunchedArrivalGaps(topActiveIncident.alerts[0])[0]?.seconds ?? null : null)
 
-  const topActiveTraffic = awaitingTrafficIncidents[0]
-  const topActiveTrafficNearest = useMemo(() => {
-    if (!topActiveTraffic) return null
-    return findNearestCorridorStop(topActiveTraffic.latitude, topActiveTraffic.longitude, routeStops.data ?? [], 2500)
-  }, [topActiveTraffic, routeStops.data])
+  const simulationNotice = awaitingIncidentAlerts.find(({ hazard }) =>
+    hazard.demoRunId && !dismissedIncidentNoticeIds.has(hazard.id))
 
   useEffect(() => {
     if (isInitialAlertCheckRef.current) {
+      if (pendingTrafficPages) return
       if (currentAlerts.length > 0 || currentTraffic.length > 0) {
         currentAlerts.forEach(a => knownAlertIdsRef.current.add(a.eventId))
-        currentTraffic.forEach((t: TrafficIncident) => knownTrafficIdsRef.current.add(t.id))
+        currentTraffic.forEach(t => knownTrafficIdsRef.current.add(t.disruptionId || t.id))
         isInitialAlertCheckRef.current = false
       }
       return
@@ -636,10 +683,8 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
         title: `Bunching on Service ${top.serviceId}${top.directionId ? ` (Dir ${top.directionId})` : ''}`,
         subtitle: `Monitored Stop: ${top.stopName || top.stopCode}`,
         detail: `Headway gap degraded to ${topGap ? `${topGap}s` : 'critical threshold'}. Directives required to restore corridor pacing.`,
-        severity: (topGap ?? 999) < 60 ? 'critical' : 'warning',
         serviceId: top.serviceId,
         directionId: top.directionId,
-        stopCode: top.stopCode,
         gapSeconds: topGap,
         detectedAt: top.detectedAt,
       })
@@ -647,39 +692,25 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
       return
     }
 
-    const awaitingTrafficIds = new Set(awaitingTrafficIncidents.map(t => t.id))
-    const newTraffic = currentTraffic.filter((t: TrafficIncident) => !knownTrafficIdsRef.current.has(t.id) && awaitingTrafficIds.has(t.id))
+    if (pendingTrafficPages) return
+    const newTraffic = awaitingIncidentAlerts.filter(({ hazard }) => !hazard.demoRunId && !knownTrafficIdsRef.current.has(hazard.id))
     if (newTraffic.length > 0) {
-      newTraffic.forEach((t: TrafficIncident) => knownTrafficIdsRef.current.add(t.id))
-      const routes = routeStops.data ?? []
-      for (const candidate of newTraffic) {
-        const nearest = findNearestCorridorStop(candidate.latitude, candidate.longitude, routes, 2500)
-        if (nearest) {
-          setActiveNewIncidentAlert({
-            id: candidate.id,
-            kind: 'traffic',
-            title: `${candidate.incidentType || 'Traffic Hazard'} Reported`,
-            subtitle: `Near ${nearest.description || nearest.stopCode} (Service ${nearest.serviceId} corridor ~${nearest.distanceM}m away)`,
-            detail: candidate.message || 'Traffic disruption reported along transit corridor.',
-            severity: 'warning',
-            serviceId: nearest.serviceId,
-            directionId: nearest.directionId,
-            stopCode: nearest.stopCode,
-            incidentType: candidate.incidentType,
-            detectedAt: candidate.observedAt ?? candidate.updatedAt ?? undefined,
-          })
-          setDirectiveAlertOpen(true)
-          break
-        }
+      newTraffic.forEach(({ hazard }) => knownTrafficIdsRef.current.add(hazard.id))
+      const candidate = newTraffic.find(({ hazard, nearest }) => nearest !== null && !dismissedIncidentNoticeIds.has(hazard.id))
+      if (candidate) {
+        setActiveNewIncidentAlert(incidentPopup(candidate))
+        setDirectiveAlertOpen(true)
       }
     }
-  }, [currentAlerts, currentTraffic, routeStops.data, activeBunchingIncidents, awaitingTrafficIncidents])
+  }, [currentAlerts, currentTraffic, activeBunchingIncidents, awaitingIncidentAlerts, dismissedIncidentNoticeIds, pendingTrafficPages])
 
-  const displayedAlert = useMemo(() => {
+  const displayedAlert = useMemo<PopupAlert | null>(() => {
+    if (simulationNotice) return incidentPopup(simulationNotice)
     if (activeNewIncidentAlert && !dismissedAlertIds.has(activeNewIncidentAlert.id) &&
         (activeNewIncidentAlert.kind === 'bunching'
           ? awaitingBunchingIncidents.some(i => i.id === activeNewIncidentAlert.id || i.alerts.some(a => a.eventId === activeNewIncidentAlert.id))
-          : awaitingTrafficIncidents.some(t => t.id === activeNewIncidentAlert.id))) {
+          : !dismissedIncidentNoticeIds.has(activeNewIncidentAlert.id) &&
+            awaitingIncidentAlerts.some(({ hazard }) => hazard.id === activeNewIncidentAlert.id))) {
       return activeNewIncidentAlert
     }
     if (topActiveIncident) {
@@ -689,33 +720,19 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
         title: `Bunching on Service ${topActiveIncident.serviceId}${topActiveIncident.directionId ? ` (Dir ${topActiveIncident.directionId})` : ''}`,
         subtitle: `Monitored Stop: ${topActiveIncident.stopNames[0] || topActiveIncident.stopCodes[0]}`,
         detail: `Headway gap degraded to ${topAlertGap ? `${topAlertGap}s` : 'critical threshold'}. Directives required to restore corridor pacing.`,
-        severity: (topAlertGap ?? 999) < 60 ? ('critical' as const) : ('warning' as const),
         serviceId: topActiveIncident.serviceId,
         directionId: topActiveIncident.directionId,
-        stopCode: topActiveIncident.stopCodes[0],
         gapSeconds: topAlertGap,
         detectedAt: topActiveIncident.latestDetectedAt,
       }
     }
-    if (topActiveTraffic) {
-      return {
-        id: topActiveTraffic.id,
-        kind: 'traffic' as const,
-        title: `${topActiveTraffic.incidentType || 'Traffic Hazard'} Reported`,
-        subtitle: topActiveTrafficNearest
-          ? `Near ${topActiveTrafficNearest.description || topActiveTrafficNearest.stopCode} (Service ${topActiveTrafficNearest.serviceId} corridor ~${topActiveTrafficNearest.distanceM}m away)`
-          : 'Corridor traffic disruption',
-        detail: topActiveTraffic.message || 'Traffic disruption reported along transit corridor.',
-        severity: 'warning' as const,
-        serviceId: topActiveTrafficNearest?.serviceId,
-        directionId: topActiveTrafficNearest?.directionId,
-        stopCode: topActiveTrafficNearest?.stopCode,
-        incidentType: topActiveTraffic.incidentType,
-        detectedAt: topActiveTraffic.observedAt ?? topActiveTraffic.updatedAt ?? undefined,
-      }
-    }
-    return null
-  }, [activeNewIncidentAlert, dismissedAlertIds, awaitingBunchingIncidents, topActiveIncident, topAlertGap, topActiveTraffic, awaitingTrafficIncidents, topActiveTrafficNearest])
+    const candidate = awaitingIncidentAlerts.find(({ hazard }) => !hazard.demoRunId && !dismissedIncidentNoticeIds.has(hazard.id))
+    return candidate ? incidentPopup(candidate) : null
+  }, [simulationNotice, activeNewIncidentAlert, dismissedAlertIds, dismissedIncidentNoticeIds, awaitingBunchingIncidents,
+    topActiveIncident, topAlertGap, awaitingIncidentAlerts])
+  const displayedIncident = displayedAlert?.kind === 'traffic'
+    ? awaitingIncidentAlerts.find(({ hazard }) => hazard.id === displayedAlert.id)
+    : undefined
 
   const handleAcknowledgeAllBunching = useCallback(() => {
     setDismissedAlertIds(prev => {
@@ -736,9 +753,9 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   const handleAcknowledgeAllIncidents = useCallback(() => {
     setDismissedAlertIds(prev => {
       const next = new Set(prev)
-      for (const inc of awaitingTrafficIncidents) {
-        next.add(inc.id)
-        if (inc.disruptionId) next.add(inc.disruptionId)
+      for (const { hazard, sourceId } of awaitingIncidentAlerts) {
+        next.add(hazard.id)
+        if (sourceId) next.add(sourceId)
       }
       saveDismissedAlertIds(next)
       return next
@@ -746,7 +763,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     setActiveNewIncidentAlert(current => (current?.kind === 'traffic' ? null : current))
     setAlertListModal(prev => (prev === 'traffic' ? null : prev))
     setDirectiveAlertOpen(prev => (displayedAlert?.kind === 'traffic' ? false : prev))
-  }, [awaitingTrafficIncidents, displayedAlert, setAlertListModal, setDirectiveAlertOpen])
+  }, [awaitingIncidentAlerts, displayedAlert, setAlertListModal, setDirectiveAlertOpen])
 
   const handleAcknowledgeListedHazards = (ids: string[]) => {
     setDismissedAlertIds(previous => {
@@ -756,6 +773,24 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     })
     setActiveNewIncidentAlert(current => current && ids.includes(current.id) ? null : current)
     if (displayedAlert && ids.includes(displayedAlert.id)) setDirectiveAlertOpen(false)
+  }
+
+  const locateIncidentAlert = ({ hazard, nearest }: IncidentAlert) => {
+    dismissIncidentNotice(hazard.id)
+    setAlertListModal(null)
+    setDirectiveAlertOpen(false)
+    const serviceId = hazard.serviceId ?? nearest?.serviceId
+    const directionId = hazard.directionId ?? nearest?.directionId
+    if (serviceId && directionId !== undefined) {
+      locateMapHazard(hazard, {
+        serviceId, directionId, hazardLocation: hazard.hazardLocation,
+        affectedStopCode: hazard.affectedStopCode ?? (hazard.demoRunId ? undefined : nearest?.stopCode),
+        affectedStopName: hazard.affectedStopName ?? (hazard.demoRunId ? undefined : nearest?.description),
+      })
+    } else {
+      setLocatedHazard(hazard)
+      navigate(`/controller/disruptions?${new URLSearchParams({ hazard: hazard.id })}`)
+    }
   }
 
   const requestLiveData = useCallback(async (signal: AbortSignal) => {
@@ -861,7 +896,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     if (!simulation && (pathname === '/controller' || pathname.endsWith('/disruptions') || pathname.endsWith('/planning'))) requests.push(alertCollection.refresh(signal))
     if (isOverview || isPlanning) requests.push(recommendationCollection.refresh(signal), diagnosisCollection.refresh(signal))
     if (pathname === '/controller/audit') requests.push(decisionCollection.refresh(signal), suggestionCollection.refresh(signal), aiAuditCollection.refresh(signal))
-    if (pathname === '/controller' || pathname.endsWith('/disruptions') || pathname.endsWith('/planning')) requests.push(trafficIncidentCollection.refresh(signal))
+    requests.push(trafficIncidentCollection.refresh(signal))
     if (simulationHazardsEnabled) requests.push(refreshSimulationHazards())
     if (pathname !== '/controller') requests.push(refreshAdvisories.current(signal))
     await Promise.allSettled(requests)
@@ -872,7 +907,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
       : pathname.endsWith('/planning') ? [recommendationCollection.lastSuccessAt, diagnosisCollection.lastSuccessAt]
       : pathname.endsWith('/audit') ? [decisionCollection.lastSuccessAt, suggestionCollection.lastSuccessAt, aiAuditCollection.lastSuccessAt] : []),
     ...(!simulation && (pathname === '/controller' || pathname.endsWith('/disruptions') || pathname.endsWith('/planning')) ? [alertCollection.lastSuccessAt] : []),
-    ...((pathname === '/controller' || pathname.endsWith('/disruptions') || pathname.endsWith('/planning')) ? [trafficIncidentCollection.lastSuccessAt] : []),
+    trafficIncidentCollection.lastSuccessAt,
     ...(simulationHazardsEnabled ? [simulationHazardCollection.lastSuccessAt] : []),
     ...(pathname !== '/controller' ? [advisoryRefreshTime.key === refreshScope ? advisoryRefreshTime.at : null] : [])]
   const lastPageRefresh = refreshTimes.includes(null) ? null : [...refreshTimes].sort()[0] ?? null
@@ -932,8 +967,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     if (simulationInvalid || simulation) return
     setSimulationStartError('')
     const selectedStop = simulationStops.find(stop => stop.stopCode === simulationConfig.monitoredStopCode) ?? simulationStops[0]
-    void switchMode({ ...simulationConfig, monitoredStopCode: roadworksScenario ? roadworksScenarioRoute.monitoredStopCode
-      : selectedStop?.stopCode ?? simulationConfig.monitoredStopCode.trim() })
+    void switchMode({ ...simulationConfig, monitoredStopCode: selectedStop?.stopCode ?? simulationConfig.monitoredStopCode.trim() })
   }
 
   return <div className="flex min-h-svh w-full bg-background">
@@ -983,16 +1017,15 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
         <DialogContent className="max-h-[90vh] overflow-y-auto"><DialogHeader><DialogTitle>Configure simulation</DialogTitle><DialogDescription>Choose one fictional route and fleet. The same buses send updated positions throughout the run.</DialogDescription></DialogHeader>
           <fieldset aria-label="Simulation settings" disabled={switching} className="grid gap-4">
             <fieldset className="grid gap-2"><legend className="text-sm font-medium">Scenario</legend>
-              {([['ROADWORKS_BUNCHING', 'Roadworks-induced bunching'], ['NORMAL', 'Normal operation'], ['BUNCHING', 'Bunching']] as const).map(([value, label]) => <label key={value} className="flex items-center gap-2 text-sm"><input type="radio" name="simulation-scenario" checked={simulationConfig.scenario === value} onChange={() => setSimulationConfig(config => {
+              {([['NORMAL', 'Normal operation'], ['BUNCHING', 'Bunching']] as const).map(([value, label]) => <label key={value} className="flex items-center gap-2 text-sm"><input type="radio" name="simulation-scenario" checked={simulationConfig.scenario === value} onChange={() => setSimulationConfig(config => {
                 if (value === 'BUNCHING') return { ...config, scenario: value }
-                return { ...config, ...(value === 'ROADWORKS_BUNCHING' ? roadworksScenarioRoute : {}), scenario: value,
+                return { ...config, scenario: value,
                   dispatchGapSeconds: config.dispatchGapSeconds <= 90 ? 120 : config.dispatchGapSeconds,
                   busGapsSeconds: config.busGapsSeconds.map(gap => gap <= 90 ? 120 : gap) }
               })} />{label}</label>)}
-              {roadworksScenario && <p className="text-xs text-muted-foreground">Roadworks delay the lead bus at Phoenix Station on Service 190.</p>}
             </fieldset>
             <label className="grid gap-1.5 text-sm font-medium">Route
-              <select disabled={roadworksScenario} value={simulationConfig.serviceId} onChange={event => setSimulationConfig(value => {
+              <select value={simulationConfig.serviceId} onChange={event => setSimulationConfig(value => {
                 const directions = routeStops.data?.filter(route => route.serviceId === event.target.value) ?? []
                 const direction = directions.find(route => route.directionId === value.directionId) ?? directions[0]
                 return { ...value, serviceId: event.target.value, directionId: direction?.directionId ?? value.directionId,
@@ -1002,7 +1035,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
               </select>
             </label>
             <label className="grid gap-1.5 text-sm font-medium">Direction
-              <Input disabled={roadworksScenario} type="number" min="1" max="99" aria-invalid={directionInvalid || undefined} value={simulationConfig.directionId} onChange={event => setSimulationConfig(value => {
+              <Input type="number" min="1" max="99" aria-invalid={directionInvalid || undefined} value={simulationConfig.directionId} onChange={event => setSimulationConfig(value => {
                 const directionId = Number(event.target.value)
                 const stop = (routeStops.data?.find(route => route.serviceId === value.serviceId && route.directionId === directionId)?.stops ?? [])[0]
                 return { ...value, directionId, monitoredStopCode: stop?.stopCode ?? value.monitoredStopCode }
@@ -1037,7 +1070,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
               {!busCountInvalid && captainAssignmentInvalid && <p role="alert" className="text-xs text-destructive">Choose a different captain for every bus, or leave all buses unassigned.</p>}
             </fieldset>
             <label className="grid gap-1.5 text-sm font-medium">Injection stop
-              {roadworksScenario ? <Input disabled value="Phoenix Stn (44141)" /> : simulationStops.length ? <select value={simulationConfig.monitoredStopCode} onChange={event => setSimulationConfig(value => ({ ...value, monitoredStopCode: event.target.value }))} className="h-10 rounded-md border bg-background px-3">
+              {simulationStops.length ? <select value={simulationConfig.monitoredStopCode} onChange={event => setSimulationConfig(value => ({ ...value, monitoredStopCode: event.target.value }))} className="h-10 rounded-md border bg-background px-3">
                 {simulationStops.map(stop => <option key={stop.stopCode} value={stop.stopCode}>{stop.description || stop.stopCode} ({stop.stopCode})</option>)}
               </select> : <Input value={simulationConfig.monitoredStopCode} onChange={event => setSimulationConfig(value => ({ ...value, monitoredStopCode: event.target.value }))} />}
             </label>
@@ -1045,7 +1078,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
               <Input type="number" min="15" max="900" value={simulationConfig.dispatchGapSeconds} onChange={event => setSimulationConfig(value => ({ ...value, dispatchGapSeconds: Number(event.target.value) }))} />
             </label>
             <fieldset className="grid gap-2"><legend className="text-sm font-medium">Gaps between individual buses (seconds)</legend>
-              <p className="text-xs text-muted-foreground">{roadworksScenario ? 'These are the gaps before the roadworks delay.' : 'Each gap is kept at this spacing during normal operation.'}</p>
+              <p className="text-xs text-muted-foreground">Each gap is kept at this spacing during normal operation.</p>
               {simulationConfig.busGapsSeconds.map((gap, index) => <label key={index} className="grid gap-1.5 text-sm">Bus {index + 1} → Bus {index + 2}
                 <Input aria-label={`Gap from bus ${index + 1} to bus ${index + 2} in seconds`} type="number" min="15" max="900" value={gap} onChange={event => setSimulationConfig(value => ({ ...value,
                   busGapsSeconds: value.busGapsSeconds.map((current, gapIndex) => gapIndex === index ? Number(event.target.value) : current),
@@ -1179,9 +1212,9 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
             <div className="flex flex-wrap items-center justify-between gap-3 pr-6">
               <div className="flex items-center gap-2">
                 <OctagonAlert className="size-5 text-rose-600" />
-                <DialogTitle>Incident & Hazard Alerts ({awaitingTrafficIncidents.length})</DialogTitle>
+                <DialogTitle>Incident & Hazard Alerts ({awaitingIncidentCount})</DialogTitle>
               </div>
-              {awaitingTrafficIncidents.length > 0 && (
+              {awaitingIncidentCount > 0 && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -1199,21 +1232,26 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
           </DialogHeader>
 
           <div className="flex-1 overflow-y-auto pr-1 space-y-3 py-2">
-            {awaitingTrafficIncidents.length === 0 ? (
+            {awaitingIncidentCount === 0 ? (
               <div className="rounded-lg border p-6 text-center text-sm text-muted-foreground bg-muted/20">
-                All traffic incident alerts have been acknowledged.
+                All incident alerts have been acknowledged.
               </div>
             ) : (
-              awaitingTrafficIncidents.map(inc => {
-                const nearest = findNearestCorridorStop(inc.latitude, inc.longitude, routeStops.data ?? [], 2500)
+              awaitingIncidentAlerts.map(incident => {
+                const { hazard, nearest, sourceId } = incident
                 return (
-                  <div key={inc.id} className="rounded-lg border p-3.5 space-y-2.5 bg-card hover:bg-muted/10 transition-colors">
+                  <article key={hazard.id} className="rounded-lg border p-3.5 space-y-2.5 bg-card hover:bg-muted/10 transition-colors">
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <div className="space-y-0.5">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-semibold text-sm">
-                            {inc.incidentType || 'Traffic Incident'}
+                            {hazard.title || hazard.incidentType || 'Traffic Incident'}
                           </span>
+                          {hazard.demoRunId && (
+                            <span className="rounded bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-800 dark:text-amber-300">
+                              Simulation
+                            </span>
+                          )}
                           {nearest && (
                             <span className="rounded bg-rose-500/10 text-rose-800 dark:text-rose-300 text-xs px-2 py-0.5 font-medium">
                               Svc {nearest.serviceId} (~{nearest.distanceM}m)
@@ -1221,17 +1259,15 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                           )}
                         </div>
                         <p className="text-xs text-foreground font-medium">
-                          {inc.message || 'Traffic disruption reported along corridor'}
+                          {hazard.message || 'Traffic disruption reported along corridor'}
                         </p>
-                        {nearest && (
+                        {(hazard.hazardLocation || nearest) && (
                           <p className="text-xs text-muted-foreground">
-                            Near {nearest.description || nearest.stopCode} {nearest.roadName ? `· ${nearest.roadName}` : ''}
+                            {hazard.hazardLocation || (nearest && `Near ${nearest.description || nearest.stopCode}${nearest.roadName ? ` · ${nearest.roadName}` : ''}`)}
                           </p>
                         )}
                       </div>
-                      <span className="text-[11px] text-muted-foreground">
-                        {formatSgtDateTime(inc.observedAt || inc.updatedAt)}
-                      </span>
+                      {hazard.updatedAt && <span className="text-[11px] text-muted-foreground">{formatSgtDateTime(hazard.updatedAt)}</span>}
                     </div>
 
                     <div className="flex flex-wrap items-center justify-end gap-2 pt-1 border-t">
@@ -1239,7 +1275,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                         variant="outline"
                         size="sm"
                         className="h-7 text-xs"
-                        onClick={() => handleDismissAlert(inc.id)}
+                        onClick={() => handleAcknowledgeListedHazards(sourceId ? [hazard.id, sourceId] : [hazard.id])}
                       >
                         Acknowledge
                       </Button>
@@ -1247,16 +1283,12 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                         variant="outline"
                         size="sm"
                         className="h-7 text-xs"
-                        onClick={() => {
-                          setAlertListModal(null)
-                          setMapSelection(inc.id)
-                          navigate(`/controller/disruptions${nearest?.serviceId ? `?service=${nearest.serviceId}` : ''}&hazard=${inc.id}`)
-                        }}
+                        onClick={() => locateIncidentAlert(incident)}
                       >
                         Locate on map
                       </Button>
                     </div>
-                  </div>
+                  </article>
                 )
               })
             )}
@@ -1264,10 +1296,10 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
 
           <DialogFooter className="border-t pt-3 flex items-center justify-between sm:justify-between">
             <span className="text-xs text-muted-foreground">
-              {awaitingTrafficIncidents.length} active incident hazards
+              {awaitingIncidentCount} active incident hazards
             </span>
             <div className="flex items-center gap-2">
-              {awaitingTrafficIncidents.length > 0 && (
+              {awaitingIncidentCount > 0 && (
                 <Button variant="outline" size="sm" onClick={handleAcknowledgeAllIncidents} className="text-xs">
                   Acknowledge all incidents
                 </Button>
@@ -1279,43 +1311,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {simulationServiceId && simulationDirectionId !== undefined && simulationHazardNotices.length > 0 && (
-        <div role="status" aria-label="Simulation hazard alerts"
-          className="fixed inset-x-3 bottom-3 z-50 max-h-[65svh] overflow-y-auto rounded-xl border border-rose-500/50 bg-background p-4 shadow-2xl sm:inset-x-auto sm:right-6 sm:bottom-6 sm:w-full sm:max-w-sm">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="flex items-center gap-2 text-sm font-semibold">
-                <OctagonAlert className="size-4 shrink-0 text-rose-600" aria-hidden="true" />
-                Simulation hazard alerts
-              </h2>
-              <p className="mt-0.5 text-xs text-muted-foreground">Service {simulationServiceId} · Direction {simulationDirectionId}</p>
-            </div>
-            <Button variant="ghost" size="icon" className="size-7 shrink-0" aria-label="Dismiss simulation hazard alerts"
-              onClick={() => dismissSimulationNotices(simulationHazardNotices.map(hazard => hazard.id))}>
-              <X className="size-4" aria-hidden="true" />
-            </Button>
-          </div>
-          <ul className="mt-2 divide-y">
-            {simulationHazardNotices.map(hazard => (
-              <li key={hazard.id} className="flex items-center justify-between gap-3 py-2 last:pb-0">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium">{hazard.title}</p>
-                  {hazard.hazardLocation && <p className="text-xs text-muted-foreground">{hazard.hazardLocation}</p>}
-                </div>
-                <Button variant="outline" size="sm" className="shrink-0" aria-label={`Locate ${hazard.title} on map`} onClick={() => {
-                  dismissSimulationNotices([hazard.id])
-                  locateMapHazard(hazard, {
-                    serviceId: simulationServiceId, directionId: simulationDirectionId,
-                    affectedStopCode: hazard.affectedStopCode, affectedStopName: hazard.affectedStopName,
-                    hazardLocation: hazard.hazardLocation,
-                  })
-                }}>Locate on map</Button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {simulationHazardNotices.length === 0 && directiveAlertOpen && displayedAlert && (
+      {alertListModal === null && (directiveAlertOpen || simulationNotice) && displayedAlert && (
         <aside
           role="alert"
           aria-live="assertive"
@@ -1338,7 +1334,14 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
               variant="ghost"
               size="icon"
               className="size-6 text-muted-foreground hover:text-foreground"
-              onClick={() => displayedAlert && handleDismissAlert(displayedAlert.id)}
+              onClick={() => {
+                if (displayedAlert.kind === 'bunching') {
+                  handleDismissAlert(displayedAlert.id)
+                  return
+                }
+                dismissIncidentNotice(displayedAlert.id)
+                if (!displayedIncident?.hazard.demoRunId) setDirectiveAlertOpen(false)
+              }}
               aria-label="Dismiss alert notice"
             >
               <X className="size-4" />
@@ -1369,6 +1372,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                   : "bg-rose-500/10 text-rose-800 dark:text-rose-300"
               )}>
                 {displayedAlert.kind === 'bunching' ? 'Status: Awaiting Directive' : 'Status: Active Hazard'}
+                {displayedIncident?.hazard.demoRunId && ' · Simulation'}
               </span>
               {displayedAlert.gapSeconds !== undefined && displayedAlert.gapSeconds !== null && (
                 <span>
@@ -1387,7 +1391,12 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                 variant="outline"
                 size="sm"
                 className="h-8 text-xs"
-                onClick={() => displayedAlert && handleDismissAlert(displayedAlert.id)}
+                onClick={() => {
+                  if (displayedIncident) {
+                    const { hazard, sourceId } = displayedIncident
+                    handleAcknowledgeListedHazards(sourceId ? [hazard.id, sourceId] : [hazard.id])
+                  } else handleDismissAlert(displayedAlert.id)
+                }}
               >
                 Acknowledge
               </Button>
@@ -1402,7 +1411,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                   Acknowledge all ({awaitingBunchingIncidents.length})
                 </Button>
               )}
-              {displayedAlert.kind === 'traffic' && awaitingTrafficIncidents.length > 1 && (
+              {displayedAlert.kind === 'traffic' && awaitingIncidentCount > 1 && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1410,7 +1419,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                   onClick={handleAcknowledgeAllIncidents}
                   title="Acknowledge all active incident alerts"
                 >
-                  Acknowledge all ({awaitingTrafficIncidents.length})
+                  Acknowledge all ({awaitingIncidentCount})
                 </Button>
               )}
             </div>
@@ -1421,11 +1430,12 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                 size="sm"
                 className="h-8 text-xs"
                 onClick={() => {
+                  if (displayedIncident) dismissIncidentNotice(displayedAlert.id)
                   setDirectiveAlertOpen(false)
                   setAlertListModal(displayedAlert.kind)
                 }}
               >
-                View all ({displayedAlert.kind === 'bunching' ? awaitingBunchingIncidents.length : awaitingTrafficIncidents.length})
+                View all ({displayedAlert.kind === 'bunching' ? awaitingBunchingCount : awaitingIncidentCount})
               </Button>
               <Button
                 variant="outline"
@@ -1436,11 +1446,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                   if (displayedAlert.kind === 'bunching') {
                     const [svc, dir] = [displayedAlert.serviceId, displayedAlert.directionId]
                     navigate(`/controller/disruptions?service=${svc}${dir ? `&direction=${dir}` : ''}&incident=${displayedAlert.id}`)
-                  } else {
-                    if (displayedAlert.id) setMapSelection(displayedAlert.id)
-                    const svc = displayedAlert.serviceId
-                    navigate(`/controller/disruptions${svc ? `?service=${svc}` : ''}&hazard=${displayedAlert.id}`)
-                  }
+                  } else if (displayedIncident) locateIncidentAlert(displayedIncident)
                 }}
               >
                 Locate on Map
@@ -1499,6 +1505,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
           routes={routeStops.data ?? []} positions={routePositions.data ?? []} pollIntervalSeconds={pollIntervalSeconds}
           gapToleranceSeconds={Math.max(30, routeIncidentGapToleranceSeconds)}
           trafficIncidents={currentTraffic}
+          simulationHazards={disruptionSimulationHazards}
           selectedHazardId={selectedHazardId}
           onSelectHazard={handleSelectMapHazard}
           onLocateHazardInList={id => locateHazardInList.current(id)}
@@ -1516,7 +1523,10 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
           trafficIncidents={currentTraffic}
           simulationHazards={simulationMapHazards}
           nowMs={nowMs}
-          onPendingChange={setPlanningPending} onRefresh={reason => { void requestRefresh(reason) }} onSaved={() => { if (displayedAlert?.id) { handleDismissAlert(displayedAlert.id) } void requestRefresh('mutation') }} />}
+          onPendingChange={setPlanningPending} onRefresh={reason => { void requestRefresh(reason) }} onSaved={() => {
+            if (displayedAlert?.kind === 'bunching') handleDismissAlert(displayedAlert.id)
+            void requestRefresh('mutation')
+          }} />}
         {pathname.endsWith('/audit') && <ControllerAudit decisions={decisionCollection} suggestions={suggestionCollection} aiAudits={aiAuditCollection} loading={loading} />}
         {pathname !== '/controller' && !pathname.endsWith('/captains') && loaded === requestKey && <ControllerAdvisories key={`${pathname}:${simulation?.id ?? 'LIVE'}`} token={token}
           registerRefresh={registerAdvisoryRefresh} onRefresh={() => { void requestRefresh('mutation') }} onPendingChange={setAdvisoryPending} onRefreshTimeChange={reportAdvisoryRefresh}

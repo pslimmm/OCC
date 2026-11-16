@@ -188,7 +188,7 @@ class DiagnosisSummaryPolicyTest {
                 "Other run", null, null, null, CONFIRMED.minusSeconds(20), "SIMULATION", UUID.randomUUID());
         var result = policy.summarize("UNKNOWN", null, List.of("bunching:event"), snapshot(List.of(flood, otherRunRoadworks)));
 
-        assertThat(result.likelyCause()).contains("Simulated hazards along this route: Flooding.")
+        assertThat(result.likelyCause()).contains("The diagnosis includes simulated incident evidence for flooding.")
                 .doesNotContain("Roadworks", "Other run", "hazard-observation:");
         assertThat(result.evidenceDetails()).singleElement().satisfies(detail -> {
             assertThat(detail.evidenceId()).isEqualTo(flood.evidenceId());

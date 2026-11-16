@@ -205,7 +205,7 @@ class RootCauseDiagnosisProcessorTest {
         verify(completion).complete(eq(requestId), diagnosis.capture(), anyList(), anyString(),
                 eq("persisted-recommendation-payload"), any(UUID.class));
         assertThat(diagnosis.getValue().likelyCause())
-                .contains("Simulated hazards along this route: Flooding, Roadworks.")
+                .contains("The diagnosis includes simulated incident evidence for flooding, roadworks.")
                 .doesNotContain("Rail disruption", "without road incidents");
         assertThat(diagnosis.getValue().supportingEvidenceIds()).containsExactlyElementsOf(event.evidenceIds());
         assertThat(diagnosis.getValue().limitations())
@@ -263,7 +263,7 @@ class RootCauseDiagnosisProcessorTest {
                 eq("persisted-recommendation-payload"), any(UUID.class));
         assertThat(diagnosis.getValue().causeCode()).isEqualTo("UNKNOWN");
         assertThat(diagnosis.getValue().limitations()).contains("The diagnosis could not verify the recorded simulation delay.");
-        assertThat(diagnosis.getValue().likelyCause()).contains("Simulated hazards along this route: Flooding, Rail disruption, Roadworks.")
+        assertThat(diagnosis.getValue().likelyCause()).contains("The diagnosis includes simulated incident evidence for flooding, rail disruption, roadworks.")
                 .doesNotContain("delayed the leading bus");
     }
 

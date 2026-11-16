@@ -134,6 +134,16 @@ class IngestionStartupIT {
     }
 
     @Test
+    void rejectsTheRetiredRoadworksPresetWhenStartingANewRun() throws Exception {
+        mvc.perform(post("/api/v1/demo-runs").with(jwt().authorities(new SimpleGrantedAuthority("ROLE_CONTROLLER")))
+                        .contentType("application/json").content("""
+                                {"serviceId":"190","directionId":1,"busCount":3,"dispatchGapSeconds":120,
+                                 "monitoredStopCode":"44141","scenario":"ROADWORKS_BUNCHING"}
+                                """))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
     void migrationsAndPollingWorkWithServiceCredentials() {
         assertThat(jdbc.queryForObject("select count(*) from ingestion.flyway_schema_history where success", Integer.class))
                 .isGreaterThanOrEqualTo(4);
@@ -368,7 +378,7 @@ class IngestionStartupIT {
     void demoReplayRowsRemainRunScopedAndUnavailableFromLiveQueries() throws Exception {
         topology.replaceIfChanged(new BusReferencePort.BusReferenceData(
                 List.of(new BusReferencePort.BusStopRecord("44251", "Demo Road", "Demo Stop",
-                        new java.math.BigDecimal("1.377"), new java.math.BigDecimal("103.771"))),
+                        new java.math.BigDecimal("1.38031"), new java.math.BigDecimal("103.76232"))),
                 List.of(new BusReferencePort.BusServiceRecord("190", "SBST", "TRUNK")),
                 List.of(new BusReferencePort.BusRouteStopRecord("190", "SBST", 1, 1, "44251",
                         java.math.BigDecimal.ZERO))), "d".repeat(64));
@@ -409,6 +419,17 @@ class IngestionStartupIT {
                 .andExpect(jsonPath("$.followingBusReference").value("demo-190-3"));
         var latestSnapshot = simulationPage.items().getLast();
         var currentIds = current.stream().map(BunchingFeedService.Arrival::observationId).toList();
+        mvc.perform(get("/internal/v1/ingestion/demo-runs/{run}/planning-context", started.id())
+                        .param("at", latestSnapshot.fetchedAt().toString()).param("serviceId", "190")
+                        .param("stopCode", "44251").param("directionId", "1")
+                        .param("arrivalObservationIds", currentIds.stream().map(UUID::toString).toArray(String[]::new))
+                        .header("X-OCC-Peer-Token", "test-planning-to-ingestion-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.incidents.length()").value(1))
+                .andExpect(jsonPath("$.incidents[0].incidentType").value("ROADWORKS"))
+                .andExpect(jsonPath("$.incidents[0].latitude").value(1.38031))
+                .andExpect(jsonPath("$.incidents[0].longitude").value(103.76232))
+                .andExpect(jsonPath("$.simulationDelay").doesNotExist());
         var detectorEvidence = new BunchingControlPort.CurrentEvidence(started.id(), bunchingEventId, "190", "44251", 1,
                 "BUNCHING", latestSnapshot.rawObservationId(), latestSnapshot.fetchedAt(), Instant.now().plusSeconds(60), true, currentIds);
         when(bunching.currentEvidence(started.id(), bunchingEventId)).thenReturn(java.util.Optional.of(detectorEvidence));

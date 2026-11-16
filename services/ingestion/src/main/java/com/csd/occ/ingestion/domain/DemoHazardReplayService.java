@@ -12,13 +12,18 @@ public class DemoHazardReplayService {
     private final RawObservationRepository raw;
     private final HazardObservationRepository hazards;
     private final HazardEvidencePort evidence;
+    private final ReferenceTopologyPort topology;
     public DemoHazardReplayService(PollRunRepository polls, RawObservationRepository raw,
-            HazardObservationRepository hazards, HazardEvidencePort evidence) {
-        this.polls = polls; this.raw = raw; this.hazards = hazards; this.evidence = evidence;
+            HazardObservationRepository hazards, HazardEvidencePort evidence, ReferenceTopologyPort topology) {
+        this.polls = polls; this.raw = raw; this.hazards = hazards; this.evidence = evidence; this.topology = topology;
     }
     @Transactional
     public void emit(DemoRun run, int step, Instant now) {
-        for (var fact : DemoHazardScenario.observations(run.configuration().scenario(), step, run.startedAt(), now)) {
+        var configuration = run.configuration();
+        String stopCode = configuration.monitoredStopCode();
+        var stop = configuration.scenario() == DemoScenario.ROADWORKS_BUNCHING ? null : topology.activeVersion()
+                .flatMap(version -> topology.busStop(version.id(), stopCode)).orElse(null);
+        for (var fact : DemoHazardScenario.observations(configuration.scenario(), step, run.startedAt(), now, stopCode, stop)) {
             String source = fact.kind().name() + "_DEMO";
             String key = "demo:" + run.id() + ":" + fact.kind() + ":" + step;
             if (polls.findByIdempotencyKey(key).isPresent()) continue;
