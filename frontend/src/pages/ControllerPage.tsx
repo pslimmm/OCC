@@ -13,6 +13,7 @@ import { ControllerSidebar, controllerPages } from '@/components/ControllerSideb
 import { ControllerOverview, ControllerDisruptions, ControllerAudit, type MapHazard } from '@/pages/ControllerViews'
 import { ControllerRouteStrip } from '@/pages/ControllerRouteStrip'
 import { ControllerPlanning } from '@/pages/ControllerPlanning'
+import { buildCorridorGroups, isActiveRecommendation } from '@/pages/planning-queue'
 import { ControllerAdvisories } from '@/pages/ControllerAdvisories'
 import { usePagedCollection } from '@/lib/paged-collection'
 import { usePageRefresh } from '@/lib/page-refresh'
@@ -170,6 +171,9 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   routeIncidentGapToleranceSeconds: number
 }) {
   const { pathname, hash } = useLocation()
+  const isOverview = pathname === '/controller'
+  const isPlanning = pathname === '/controller/planning'
+  const isCaptains = pathname === '/controller/captains'
   const current = controllerPages.find(page => page.path === pathname)!
   const [advisoryPending, setAdvisoryPending] = useState(false)
   const [planningPending, setPlanningPending] = useState(false)
@@ -216,6 +220,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   const [modeError, setModeError] = useState('')
   const navigate = useNavigate()
   const [simulationDialogOpen, setSimulationDialogOpen] = useState(false)
+  const [simulationStartError, setSimulationStartError] = useState('')
   const [simulationConfig, setSimulationConfig] = useState({ serviceId: '190', directionId: 1, busCount: 3, dispatchGapSeconds: 90, busGapsSeconds: [90, 90], monitoredStopCode: '44251', scenario: 'BUNCHING' as 'NORMAL' | 'BUNCHING', captainUserIds: ['', '', ''] })
   const [directiveAlertOpen, setDirectiveAlertOpen] = useState(false)
   const [alertListModal, setAlertListModal] = useState<'bunching' | 'traffic' | null>(null)
@@ -265,6 +270,14 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   const captainAssignmentInvalid = !captainSelectionIsValid(simulationConfig.captainUserIds, simulationConfig.busCount)
   const simulationDirections = routeStops.data?.filter(route => route.serviceId === simulationConfig.serviceId) ?? []
   const simulationStops = simulationDirections.find(route => route.directionId === simulationConfig.directionId)?.stops ?? []
+  const wholeNumberBetween = (value: number, min: number, max: number) => Number.isInteger(value) && value >= min && value <= max
+  const directionInvalid = !wholeNumberBetween(simulationConfig.directionId, 1, 99) ||
+    (simulationDirections.length > 0 && !simulationDirections.some(route => route.directionId === simulationConfig.directionId))
+  const busCountInvalid = !wholeNumberBetween(simulationConfig.busCount, 2, 20)
+  const gapInvalid = !wholeNumberBetween(simulationConfig.dispatchGapSeconds, 15, 900) ||
+    simulationConfig.busGapsSeconds.some(gap => !wholeNumberBetween(gap, 15, 900))
+  const stopInvalid = !simulationConfig.monitoredStopCode.trim() || simulationConfig.monitoredStopCode.trim().length > 20
+  const simulationInvalid = directionInvalid || busCountInvalid || gapInvalid || stopInvalid || captainAssignmentInvalid
 
   useEffect(() => {
     if (!simulationDialogOpen) return
@@ -290,10 +303,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   const reportAdvisoryRefresh = useCallback((at: string | null) => {
     setAdvisoryRefreshTime(previous => previous.key === refreshScope && previous.at === at ? previous : { key: refreshScope, at })
   }, [refreshScope])
-  const arrivalCollectionKey = `${token}:${arrivalStopName}:${arrivalSortBy}:${arrivalSortDirection}`
-  const arrivalCollection = usePagedCollection<Arrival, PageResult<Arrival>>(arrivalCollectionKey, async (page, signal) => {
-    const params = new URLSearchParams({ page: String(page), size: '50', sortBy: arrivalSortBy, sortDirection: arrivalSortDirection })
-    if (arrivalStopName) params.set('stopName', arrivalStopName)
+  const fetchArrivalPage = async (params: URLSearchParams, signal: AbortSignal) => {
     try {
       const result = await apiRequest<PageResult<Arrival>>(`/api/v1/arrivals?${params}`, token, signal)
       if (!result) throw new Error('The arrivals response was empty.')
@@ -302,7 +312,17 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
       if (error instanceof ApiError && error.status === 401 && !signal.aborted) void signOut(error.message)
       throw error
     }
-  }, arrival => arrival.observationId, pathname === '/controller')
+  }
+  const arrivalCollectionKey = `${token}:${arrivalStopName}:${arrivalSortBy}:${arrivalSortDirection}`
+  const arrivalCollection = usePagedCollection<Arrival, PageResult<Arrival>>(arrivalCollectionKey, (page, signal) => {
+    const params = new URLSearchParams({ page: String(page), size: '50', sortBy: arrivalSortBy, sortDirection: arrivalSortDirection })
+    if (arrivalStopName) params.set('stopName', arrivalStopName)
+    return fetchArrivalPage(params, signal)
+  }, arrival => arrival.observationId, isOverview, { preservePagesOnRefresh: true })
+  const arrivalTotal = usePagedCollection<Arrival, PageResult<Arrival>>(token, (_, signal) =>
+    fetchArrivalPage(new URLSearchParams({ page: '0', size: '1' }), signal),
+  arrival => arrival.observationId, isOverview && !!arrivalStopName)
+  const overviewArrivals = arrivalStopName ? arrivalTotal : arrivalCollection
   const scopeKey = `${token}:${simulation?.id ?? 'LIVE'}`
   const alertCollection = usePagedCollection<BunchingAlert, PageResult<BunchingAlert>>(scopeKey, async (page, signal) => {
     const params = new URLSearchParams({ page: String(page), size: '200' })
@@ -336,7 +356,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
       if (error instanceof ApiError && error.status === 401 && !signal.aborted) void signOut(error.message)
       throw error
     }
-  }, request => request.requestId, scopeVerified && pathname === '/controller/planning')
+  }, request => request.requestId, scopeVerified && (isOverview || isPlanning))
   const decisionCollection = usePagedCollection<Decision, PageResult<Decision>>(token, async (page, signal) => {
     const params = new URLSearchParams({ page: String(page), size: '100' })
     try {
@@ -401,9 +421,9 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   const pollIntervalSeconds = routePositions.data?.length
     ? Math.min(...routePositions.data.map(value => value.refreshIntervalSeconds)) : ingestionPollIntervalSeconds
   const nowMs = Date.parse(alertCollection.lastSuccessAt || (simulation ? shellRefreshTime.at : '') || currentAlerts[0]?.detectedAt || '') || 0
-  const activeBunchingIncidents = useMemo(() => {
+  const bunchingIncidents = useMemo(() => {
     if (!currentAlerts.length || !routeStops.data?.length) return []
-    const incidents = groupRouteIncidents(
+    return groupRouteIncidents(
       currentAlerts,
       routeStops.data,
       nowMs,
@@ -411,8 +431,8 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
       Math.max(30, routeIncidentGapToleranceSeconds),
       Boolean(simulation)
     )
-    return incidents.filter(i => !i.historical)
   }, [currentAlerts, routeStops.data, nowMs, pollIntervalSeconds, routeIncidentGapToleranceSeconds, simulation])
+  const activeBunchingIncidents = useMemo(() => bunchingIncidents.filter(incident => !incident.historical), [bunchingIncidents])
 
   const awaitingBunchingIncidents = useMemo(() => {
     return activeBunchingIncidents.filter(incident => {
@@ -638,6 +658,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     const activeSimulation = resolvedRun.data && resolvedRun.data.status !== 'CLOSED' ? resolvedRun.data : null
     const nextRouteStops = await loadRouteDirections(token,
       activeSimulation ? [activeSimulation.serviceId || '190'] : ['190', '972'], signal)
+    if (signal.aborted) return false
     if (live && !activeSimulation) {
       setRouteArrivals(previous => live.routeArrivals.error && previous.data ? { ...previous, error: live.routeArrivals.error } : live.routeArrivals)
       setRoutePositions(previous => {
@@ -652,10 +673,9 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     setRun(resolvedRun)
     if ((pathname === '/controller' || pathname.endsWith('/disruptions') || pathname.endsWith('/planning')) && activeSimulation) {
       const simulationPositions = await loadSimulationRoutePositions(token, activeSimulation.id, signal)
-      if (!signal.aborted) {
-        setRoutePositions(simulationPositions)
-        setRouteArrivals({ data: [], error: '' })
-      }
+      if (signal.aborted) return false
+      setRoutePositions(simulationPositions)
+      setRouteArrivals({ data: [], error: '' })
     }
     routeReference.current = nextRouteStops
     setRouteStops(nextRouteStops)
@@ -674,8 +694,8 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     return () => controller.abort()
   }, [loadShell])
 
-  const collectionsLoading = pathname === '/controller'
-    ? arrivalCollection.isLoading || !simulation && alertCollection.isLoading || recommendationCollection.isLoading
+  const collectionsLoading = isOverview
+    ? arrivalCollection.isLoading || arrivalTotal.isLoading || !simulation && alertCollection.isLoading || recommendationCollection.isLoading || diagnosisCollection.isLoading
     : pathname.endsWith('/disruptions') ? !simulation && alertCollection.isLoading
       : pathname.endsWith('/planning') ? recommendationCollection.isLoading || diagnosisCollection.isLoading || (!simulation && alertCollection.isLoading)
       : pathname.endsWith('/audit') && (decisionCollection.isLoading || suggestionCollection.isLoading || aiAuditCollection.isLoading)
@@ -683,9 +703,12 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     const modeChanged = await loadShell(signal)
     if (signal.aborted || modeChanged) return
     const requests: Promise<void>[] = []
-    if (pathname === '/controller') requests.push(arrivalCollection.refresh(signal), recommendationCollection.refresh(signal))
+    if (isOverview) {
+      requests.push(arrivalCollection.refresh(signal))
+      if (arrivalStopName) requests.push(arrivalTotal.refresh(signal))
+    }
     if (!simulation && (pathname === '/controller' || pathname.endsWith('/disruptions') || pathname.endsWith('/planning'))) requests.push(alertCollection.refresh(signal))
-    if (pathname === '/controller/planning') requests.push(recommendationCollection.refresh(signal), diagnosisCollection.refresh(signal))
+    if (isOverview || isPlanning) requests.push(recommendationCollection.refresh(signal), diagnosisCollection.refresh(signal))
     if (pathname === '/controller/audit') requests.push(decisionCollection.refresh(signal), suggestionCollection.refresh(signal), aiAuditCollection.refresh(signal))
     if (pathname === '/controller' || pathname.endsWith('/disruptions') || pathname.endsWith('/planning')) requests.push(trafficIncidentCollection.refresh(signal))
     if (pathname !== '/controller') requests.push(refreshAdvisories.current(signal))
@@ -693,7 +716,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   }, loading || collectionsLoading || advisoryPending || planningPending || switching, requestKey)
 
   const refreshTimes = [shellRefreshTime.key === requestKey ? shellRefreshTime.at : null,
-    ...(pathname === '/controller' ? [arrivalCollection.lastSuccessAt, recommendationCollection.lastSuccessAt]
+    ...(isOverview ? [arrivalCollection.lastSuccessAt, overviewArrivals.lastSuccessAt, recommendationCollection.lastSuccessAt, diagnosisCollection.lastSuccessAt]
       : pathname.endsWith('/planning') ? [recommendationCollection.lastSuccessAt, diagnosisCollection.lastSuccessAt]
       : pathname.endsWith('/audit') ? [decisionCollection.lastSuccessAt, suggestionCollection.lastSuccessAt, aiAuditCollection.lastSuccessAt] : []),
     ...(!simulation && (pathname === '/controller' || pathname.endsWith('/disruptions') || pathname.endsWith('/planning')) ? [alertCollection.lastSuccessAt] : []),
@@ -705,7 +728,17 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   const recommendationPage = recommendationCollection.latestPage
   const recommendationMatches = !run.error && recommendationPage?.mode === modeValue &&
     (recommendationPage.demoRunId ?? null) === (simulation?.id ?? null)
-  const pending = recommendationMatches ? recommendationPage.totalItems : undefined
+  const diagnosisPage = diagnosisCollection.latestPage
+  const diagnosisMatches = !run.error && diagnosisPage?.mode === modeValue &&
+    (diagnosisPage.demoRunId ?? null) === (simulation?.id ?? null)
+  const decisionCountPartial = recommendationCollection.hasMore || diagnosisCollection.hasMore || !simulation && alertCollection.hasMore
+  const pending = useMemo(() => {
+    if (!isOverview || !recommendationMatches || !diagnosisMatches) return undefined
+    const corridors = buildCorridorGroups(diagnosisCollection.items, bunchingIncidents, routeStops.data ?? [])
+    return corridors.filter(group => simulation || group.isLive).length +
+      recommendationCollection.items.filter(item => simulation || isActiveRecommendation(item, currentAlerts)).length
+  }, [isOverview, recommendationMatches, diagnosisMatches, diagnosisCollection.items, bunchingIncidents, routeStops.data,
+    simulation, recommendationCollection.items, currentAlerts])
   const alertResource: Resource<PageResult<BunchingAlert>> = {
     data: alertCollection.latestPage ? { ...alertCollection.latestPage, items: alertCollection.items } : null,
     error: alertCollection.error !== null && !alertCollection.items.length ? 'Unable to load bunching detections.' : '',
@@ -725,11 +758,13 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
         ...(selectedCaptainIds(configuration.captainUserIds, configuration.busCount).every(Boolean)
           ? { captainUserIds: selectedCaptainIds(configuration.captainUserIds, configuration.busCount) } : { captainUserIds: undefined }),
       } } : {}) })
+      if (configuration && !controller.signal.aborted) setSimulationDialogOpen(false)
     } catch (error) {
       if (controller.signal.aborted) return
       if (error instanceof ApiError && error.status === 401) void signOut(error.message)
-      else setModeError(error instanceof ApiError && error.status === 403 ? 'You do not have permission to switch modes.' :
+      else (configuration ? setSimulationStartError : setModeError)(error instanceof ApiError && error.status === 403 ? 'You do not have permission to switch modes.' :
         error instanceof ApiError && error.status === 409 ? 'A simulation is already active. Checking the current mode.' :
+          configuration && error instanceof ApiError && error.status === 400 ? error.message :
           'Unable to switch modes. Check the current mode before trying again.')
     } finally {
       switchingRef.current = false
@@ -741,8 +776,10 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   }
 
   function startSimulation() {
-    setSimulationDialogOpen(false)
-    void switchMode(simulationConfig)
+    if (simulationInvalid || simulation) return
+    setSimulationStartError('')
+    const selectedStop = simulationStops.find(stop => stop.stopCode === simulationConfig.monitoredStopCode) ?? simulationStops[0]
+    void switchMode({ ...simulationConfig, monitoredStopCode: selectedStop?.stopCode ?? simulationConfig.monitoredStopCode.trim() })
   }
 
   return <div className="flex min-h-svh w-full bg-background">
@@ -782,12 +819,15 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
             </Button>
           )}
           <Button variant="outline" disabled={loading || isRefreshing || advisoryPending || planningPending || !!run.error}
-            onClick={() => simulation ? void switchMode() : setSimulationDialogOpen(true)}>{switching ? 'Switching…' : simulation ? 'Return to live' : 'Start simulation'}</Button>
+            onClick={() => {
+              if (simulation) void switchMode()
+              else { setSimulationStartError(''); setSimulationDialogOpen(true) }
+            }}>{switching ? 'Switching…' : simulation ? 'Return to live' : 'Start simulation'}</Button>
         </div>
       </header>
       <Dialog open={simulationDialogOpen} onOpenChange={open => { if (!switching) setSimulationDialogOpen(open) }}>
         <DialogContent className="max-h-[90vh] overflow-y-auto"><DialogHeader><DialogTitle>Configure simulation</DialogTitle><DialogDescription>Choose one fictional route and fleet. The same buses send updated positions throughout the run.</DialogDescription></DialogHeader>
-          <div className="grid gap-4">
+          <fieldset aria-label="Simulation settings" disabled={switching} className="grid gap-4">
             <label className="grid gap-1.5 text-sm font-medium">Route
               <select value={simulationConfig.serviceId} onChange={event => setSimulationConfig(value => {
                 const directions = routeStops.data?.filter(route => route.serviceId === event.target.value) ?? []
@@ -799,15 +839,16 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
               </select>
             </label>
             <label className="grid gap-1.5 text-sm font-medium">Direction
-              <Input type="number" min="1" max="99" value={simulationConfig.directionId} onChange={event => setSimulationConfig(value => {
+              <Input type="number" min="1" max="99" aria-invalid={directionInvalid || undefined} value={simulationConfig.directionId} onChange={event => setSimulationConfig(value => {
                 const directionId = Number(event.target.value)
                 const stop = (routeStops.data?.find(route => route.serviceId === value.serviceId && route.directionId === directionId)?.stops ?? [])[0]
                 return { ...value, directionId, monitoredStopCode: stop?.stopCode ?? value.monitoredStopCode }
               })} />
             </label>
             <label className="grid gap-1.5 text-sm font-medium">Buses in this injection
-              <Input type="number" min="2" max="20" value={simulationConfig.busCount} onChange={event => setSimulationConfig(value => {
-                const busCount = Math.max(2, Math.min(20, Number(event.target.value) || 2))
+              <Input type="number" min="2" max="20" aria-invalid={busCountInvalid || undefined} value={simulationConfig.busCount} onChange={event => setSimulationConfig(value => {
+                const busCount = Number(event.target.value)
+                if (!wholeNumberBetween(busCount, 2, 20)) return { ...value, busCount }
                 return { ...value, busCount, busGapsSeconds: Array.from({ length: busCount - 1 }, (_, index) => value.busGapsSeconds[index] ?? value.dispatchGapSeconds), captainUserIds: Array.from({ length: busCount }, (_, index) => value.captainUserIds[index] ?? '') }
               })} />
             </label>
@@ -818,7 +859,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
               {captainsLoading && <p role="status" className="text-xs text-muted-foreground">Searching captains…</p>}
               {captainSearchError && <p role="alert" className="text-xs text-destructive">{captainSearchError}</p>}
               {!captainsLoading && !captainSearchError && !availableCaptains.length && <p className="text-xs text-muted-foreground">No available captains match this search.</p>}
-              {simulationConfig.captainUserIds.slice(0, simulationConfig.busCount).map((userId, index) => {
+              {simulationConfig.captainUserIds.map((userId, index) => {
                 const usedByAnotherBus = new Set(simulationConfig.captainUserIds.filter((id, otherIndex) => otherIndex !== index && id))
                 const options = availableCaptains.filter(captain => captain.id === userId || !usedByAnotherBus.has(captain.id))
                 const selectedMissing = userId && !options.some(captain => captain.id === userId)
@@ -830,7 +871,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                   </select>
                 </label>
               })}
-              {captainAssignmentInvalid && <p role="alert" className="text-xs text-destructive">Choose a different captain for every bus, or leave all buses unassigned.</p>}
+              {!busCountInvalid && captainAssignmentInvalid && <p role="alert" className="text-xs text-destructive">Choose a different captain for every bus, or leave all buses unassigned.</p>}
             </fieldset>
             <label className="grid gap-1.5 text-sm font-medium">Injection stop
               {simulationStops.length ? <select value={simulationConfig.monitoredStopCode} onChange={event => setSimulationConfig(value => ({ ...value, monitoredStopCode: event.target.value }))} className="h-10 rounded-md border bg-background px-3">
@@ -855,8 +896,13 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
                   busGapsSeconds: config.busGapsSeconds.map(gap => gap <= 90 ? 120 : gap) }
               })} />{label}</label>)}
             </fieldset>
-          </div>
-          <DialogFooter><Button variant="outline" onClick={() => setSimulationDialogOpen(false)}>Cancel</Button><Button disabled={captainAssignmentInvalid} onClick={startSimulation}>Start simulation</Button></DialogFooter>
+          </fieldset>
+          {directionInvalid && <p role="alert" className="text-sm text-destructive">Enter a valid direction for the selected route.</p>}
+          {busCountInvalid && <p role="alert" className="text-sm text-destructive">Enter a whole number from 2 to 20 for the number of buses.</p>}
+          {gapInvalid && <p role="alert" className="text-sm text-destructive">Enter whole numbers from 15 to 900 seconds for every gap.</p>}
+          {stopInvalid && <p role="alert" className="text-sm text-destructive">Enter an injection stop code of up to 20 characters.</p>}
+          {simulationStartError && <p role="alert" className="text-sm text-destructive">{simulationStartError}</p>}
+          <DialogFooter><Button variant="outline" disabled={switching} onClick={() => setSimulationDialogOpen(false)}>Cancel</Button><Button disabled={simulationInvalid || switching || !!simulation} onClick={startSimulation}>{switching ? 'Starting…' : 'Start simulation'}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
       <Dialog open={alertListModal === 'bunching'} onOpenChange={open => { if (!open) setAlertListModal(null) }}>
@@ -1232,17 +1278,19 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
         <PageRefreshStatus lastSuccessAt={lastPageRefresh} intervalSeconds={controllerRefreshIntervalSeconds} />
         {run.error && !loading && <p role="alert" className="text-sm text-destructive">{run.error} Simulation state could not be verified.</p>}
         {modeError && <p role="alert" className="text-sm text-destructive">{modeError}</p>}
-        {pathname.endsWith('/captains') && <ControllerCaptainsPage token={token} />}
+        {isCaptains && <ControllerCaptainsPage token={token} refreshing={loading || isRefreshing}
+          registerRefresh={registerAdvisoryRefresh} onRefreshTimeChange={reportAdvisoryRefresh} onRefresh={() => { void requestRefresh() }} />}
         {pathname === '/controller' && <>
           <div className="grid gap-4 sm:grid-cols-3">
             {[
-              { title: 'Current arrivals', value: arrivalCollection.latestPage?.totalItems,
-                error: arrivalCollection.error && !arrivalCollection.items.length ? 'Unable to load this data.' : '', note: 'Live arrival records', to: '#arrivals' },
+              { title: 'Current arrivals', value: overviewArrivals.latestPage?.totalItems,
+                error: overviewArrivals.error && !overviewArrivals.latestPage ? 'Unable to load this data.' : '', note: 'Live arrival records', to: '#arrivals' },
               { title: simulation ? 'Simulation detections' : 'Bunching detections', value: simulation ? simulation.alerts.length : alertCollection.latestPage?.totalItems,
                 error: run.error || (!simulation && alertCollection.error !== null && !alertCollection.items.length), note: 'View disruptions →', to: '/controller/disruptions' },
               { title: 'Awaiting decision', value: pending,
-                error: run.error || recommendationCollection.error !== null || !!recommendationPage && !recommendationMatches,
-                note: 'Open decision queue →', to: '/controller/planning' },
+                error: run.error || recommendationCollection.error !== null || diagnosisCollection.error !== null ||
+                  !!recommendationPage && !recommendationMatches || !!diagnosisPage && !diagnosisMatches,
+                note: decisionCountPartial ? 'Open decision queue · Loaded cases only' : 'Open decision queue →', to: '/controller/planning' },
             ].map(item => <Link key={item.title} to={item.to} className="rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring"><Card className="h-full hover:bg-muted/30"><CardContent className="space-y-3 p-1 px-5"><p className="text-sm text-muted-foreground">{item.title}</p><p className="text-3xl font-semibold tabular-nums">{loading || item.error ? '—' : item.value ?? '—'}</p><p className="text-xs text-muted-foreground">{item.error ? 'Unavailable · refresh to retry' : item.note}</p></CardContent></Card></Link>)}
           </div>
           <ControllerRouteStrip alerts={alertResource} run={run} stops={routeStops} positions={routePositions}
@@ -1274,7 +1322,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
           routes={routeStops.data ?? []} pollIntervalSeconds={pollIntervalSeconds}
           gapToleranceSeconds={Math.max(30, routeIncidentGapToleranceSeconds)}
           trafficIncidents={currentTraffic}
-          nowMs={Date.parse(alertCollection.lastSuccessAt || (simulation ? shellRefreshTime.at : '') || '') || 0}
+          nowMs={nowMs}
           onPendingChange={setPlanningPending} onRefresh={reason => { void requestRefresh(reason) }} onSaved={() => { if (displayedAlert?.id) { handleDismissAlert(displayedAlert.id) } void requestRefresh('mutation') }} />}
         {pathname.endsWith('/audit') && <ControllerAudit decisions={decisionCollection} suggestions={suggestionCollection} aiAudits={aiAuditCollection} loading={loading} />}
         {pathname !== '/controller' && !pathname.endsWith('/captains') && loaded === requestKey && <ControllerAdvisories key={`${pathname}:${simulation?.id ?? 'LIVE'}`} token={token}

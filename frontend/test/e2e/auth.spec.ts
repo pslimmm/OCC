@@ -498,6 +498,7 @@ test('arrivals search, sorting and scrolling use isolated server pages and prese
   await search.fill('none')
   await page.getByRole('button', { name: 'Search', exact: true }).click()
   await expect(page.getByText('No arrivals match this stop name', { exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Current arrivals/ })).toContainText('60')
   await search.fill('')
   await page.getByRole('button', { name: 'Search', exact: true }).click()
   await expect(rows).toHaveCount(50)
@@ -507,6 +508,17 @@ test('arrivals search, sorting and scrolling use isolated server pages and prese
   })
   await expect(rows).toHaveCount(60)
   expect(requests.some(params => params.get('page') === '1')).toBe(true)
+  await viewport.evaluate(element => { element.scrollTop = 420 })
+  const scrollTop = await viewport.evaluate(element => element.scrollTop)
+  const updatedSecondPage = page.waitForResponse(response => {
+    const url = new URL(response.url())
+    return url.pathname === '/api/v1/arrivals' && url.searchParams.get('size') === '50' && url.searchParams.get('page') === '1'
+  })
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await updatedSecondPage
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
+  await expect(rows).toHaveCount(60)
+  expect(await viewport.evaluate(element => element.scrollTop)).toBe(scrollTop)
   await expect(page.getByRole('button', { name: /Previous|Next/ })).toHaveCount(0)
 
   await search.fill('old')
@@ -697,6 +709,27 @@ test('controller keeps the awaiting decision panel visible before a simulation r
   await expect(page.getByText('No bunching requests in this time window.', { exact: true })).toBeVisible()
 })
 
+test('overview counts active diagnosis requests in the decision queue', async ({ page, context }) => {
+  await mockAuth(context, 'CONTROLLER')
+  const detectedAt = new Date().toISOString()
+  await context.route('**/api/v1/live-bunching-alerts?*', route => route.fulfill({ json: {
+    items: [{ eventId: 'active-alert', action: 'OPENED', classification: 'OBSERVATION_ONLY',
+      serviceId: '190', directionId: 1, stopCode: 'B01', detectedAt }], page: 0, totalItems: 1, totalPages: 1,
+  } }))
+  await context.route('**/api/v1/planning/diagnoses?*', route => route.fulfill({ json: {
+    mode: 'LIVE', demoRunId: null, page: 0, totalItems: 1, totalPages: 1,
+    items: [{ requestId: 'active-request', eventId: 'active-alert', diagnosisId: null, classification: 'OBSERVATION_ONLY',
+      demoRunId: null, serviceId: '190', directionId: 1, stopCode: 'B01', affectedBusReferences: [],
+      status: 'PENDING', processingRequested: false, limitations: [], evidenceDetails: [], createdAt: detectedAt }],
+  } }))
+  await login(page)
+  const queueLink = page.getByRole('link', { name: /Awaiting decision/ })
+  await expect(queueLink).toHaveAccessibleName('Awaiting decision 1 Open decision queue →')
+  await queueLink.click()
+  await expect(page.getByRole('button', { name: 'Active (1)', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Generate diagnosis', exact: true })).toBeVisible()
+})
+
 test('controller sees a requested diagnosis progress automatically', async ({ page, context }) => {
   await page.clock.install()
   await mockDashboard(context)
@@ -753,6 +786,44 @@ test('controller sees a requested diagnosis progress automatically', async ({ pa
   expect(triggerCount).toBe(1)
 })
 
+test('planning service search hides linked case details and actions when nothing matches', async ({ page, context }) => {
+  await mockDashboard(context)
+  await context.route('**/api/v1/planning/diagnoses?*', route => route.fulfill({ json: {
+    mode: 'DEMO', demoRunId: 'run-1', page: 0, totalItems: 1, totalPages: 1, items: [{
+      requestId: 'linked-request', eventId: 'event-1', diagnosisId: null, classification: 'SIMULATION', demoRunId: 'run-1',
+      serviceId: '190', directionId: 1, stopCode: 'B01', status: 'PENDING', likelyCause: null, confidence: null,
+      affectedBusReferences: [], limitations: [], evidenceDetails: [], failureCode: null, policyOutcome: null,
+      processingRequested: false, createdAt: '2026-10-22T01:00:00Z',
+    }],
+  } }))
+  await login(page, '/controller/planning?service=190&stop=B01&incident=event-1')
+  const queue = page.getByRole('listbox', { name: 'Recommendations awaiting a decision', exact: true })
+  const filter = page.getByRole('textbox', { name: 'Filter by bus service number', exact: true })
+  const generate = page.getByRole('button', { name: 'Generate diagnosis', exact: true })
+  const approve = page.getByRole('button', { name: 'Approve recommendation', exact: true })
+  await expect(filter).toHaveValue('190')
+  await expect(queue.getByRole('option')).toHaveCount(2)
+  await expect(generate).toBeVisible()
+
+  await filter.fill('99999')
+  await expect(page.getByRole('button', { name: 'All time (0)', exact: true })).toBeVisible()
+  await expect(queue.getByText('No matching bus service.', { exact: true })).toBeVisible()
+  await expect(queue.getByRole('option')).toHaveCount(0)
+  await expect(generate).toHaveCount(0)
+  await expect(approve).toHaveCount(0)
+
+  await filter.clear()
+  await expect(generate).toBeVisible()
+  await queue.getByRole('option').filter({ hasText: 'Sample congestion' }).click()
+  await expect(approve).toBeVisible()
+
+  await filter.fill('99999')
+  await expect(queue.getByRole('option')).toHaveCount(0)
+  await expect(approve).toHaveCount(0)
+  await filter.clear()
+  await expect(approve).toBeVisible()
+})
+
 test('early controller suggestions show identified bus registrations, not observation UUIDs', async ({ page, context }) => {
   await mockDashboard(context, { bunchingPair: ['DEMO-190-02', 'DEMO-190-03'] })
   const observationIds = ['66a893e5-102c-4008-a9d9-39a7e98a491b', '7d445d55-75f5-4080-a1e1-123456789abc']
@@ -796,7 +867,7 @@ test('controller switches the shared backend mode from the dashboard without lea
   await context.route('**/api/v1/demo-runs', route => {
     expect(route.request().method()).toBe('POST')
     expect(route.request().headers().authorization).toMatch(/^Bearer /)
-    expect(route.request().postDataJSON()).toEqual({ serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 90, busGapsSeconds: [90, 90, 90], monitoredStopCode: '44251', scenario: 'BUNCHING', captainUserIds: ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004'] })
+    expect(route.request().postDataJSON()).toEqual({ serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 90, busGapsSeconds: [90, 90, 90], monitoredStopCode: 'A01', scenario: 'BUNCHING', captainUserIds: ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004'] })
     active = true; starts++
     return route.fulfill({ status: 201, json: simulation })
   })
@@ -837,13 +908,45 @@ test('controller switches the shared backend mode from the dashboard without lea
   await expect(page.getByRole('cell', { name: 'SG1001A' })).toBeVisible()
 })
 
+test('captains header and directory refresh buttons both reload the directory', async ({ page, context }) => {
+  await mockAuth(context, 'CONTROLLER')
+  let directoryRequests = 0
+  await context.route('**/api/v1/ingestion/captains?*', async route => {
+    directoryRequests++
+    await route.fulfill({ json: { items: [], page: 0, size: 20, totalItems: 0, totalPages: 0 } })
+  })
+  await login(page, '/controller/captains')
+  await expect(page.getByLabel('Page refresh status')).toContainText('Last successful refresh')
+  const initialRequests = directoryRequests
+  await page.locator('header').getByRole('button', { name: 'Refresh', exact: true }).click()
+  await expect.poll(() => directoryRequests).toBeGreaterThan(initialRequests)
+  const afterHeader = directoryRequests
+  await page.getByRole('button', { name: 'Refresh', exact: true }).last().click()
+  await expect.poll(() => directoryRequests).toBeGreaterThan(afterHeader)
+  await expect(page.getByText('No captains found.')).toBeVisible()
+})
+
 test('failed mode changes keep the verified mode and show a useful error', async ({ page, context }) => {
   await mockAuth(context, 'CONTROLLER')
   await context.route('**/api/v1/demo-runs', route => route.fulfill({ status: 503 }))
   await login(page)
   await page.getByRole('button', { name: 'Start simulation', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Start simulation', exact: true }).click()
-  await expect(page.getByRole('alert')).toContainText('Unable to switch modes')
+  const dialog = page.getByRole('dialog', { name: 'Configure simulation' })
+  const start = dialog.getByRole('button', { name: 'Start simulation', exact: true })
+  const direction = dialog.getByLabel('Direction', { exact: true })
+  await direction.fill('0')
+  await expect(start).toBeDisabled()
+  await expect(dialog.getByText('Enter a valid direction for the selected route.')).toBeVisible()
+  await direction.fill('1')
+  const defaultGap = dialog.getByLabel('Default gap for new buses (seconds)')
+  await defaultGap.fill('0')
+  await expect(start).toBeDisabled()
+  await expect(dialog.getByText('Enter whole numbers from 15 to 900 seconds for every gap.')).toBeVisible()
+  await defaultGap.fill('105')
+  await start.click()
+  await expect(dialog.getByRole('alert')).toContainText('Unable to switch modes')
+  await expect(defaultGap).toHaveValue('105')
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page.getByRole('status').filter({ hasText: /^Live$/ })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Start simulation', exact: true })).toBeEnabled()
   await context.route('**/api/v1/demo-runs/active', route => route.fulfill({ status: 503 }))
