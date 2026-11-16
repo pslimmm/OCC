@@ -172,27 +172,19 @@ class BunchingEvidenceSupportPolicyTest {
         var driftResult = policy.associate(event(), context, driftOutput, Duration.ofMinutes(15), 1);
         assertThat(driftResult.causeSubtype()).isEqualTo("CUMULATIVE_DRIFT");
         assertThat(driftResult.facts()).anySatisfy(fact -> assertThat(fact).contains("Uniform passenger load category (SEA)"));
-        assertThat(driftResult.limitations()).contains("No nearby incidents: No traffic accidents or roadworks reported along this route.");
+        assertThat(driftResult.limitations()).contains("The observed gap alone cannot identify what reduced bus spacing.");
     }
 
     @Test
-    void evaluatesNonProximateTrafficIncidentsUnderHeadwayDecay() {
-        var lead = new ArrivalEvidence("arrival:lead", UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
-                "190", "44251", 1, CONFIRMED, CONFIRMED, new BigDecimal("1.3"), new BigDecimal("103.8"),
-                "SEA", "DD", "SIMULATION", RUN, null);
-        var follow = new ArrivalEvidence("arrival:follow", UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
-                "190", "44251", 1, CONFIRMED.plusSeconds(32), CONFIRMED, new BigDecimal("1.3"), new BigDecimal("103.8"),
-                "SEA", "DD", "SIMULATION", RUN, null);
-        var distantIncident = incident("incident:far", "Road Works", CONFIRMED.minusSeconds(120), "1.35", "103.85");
-        var context = new RootCauseContext("SIMULATION", RUN, null, List.of(lead, follow), List.of(distantIncident), List.of());
+    void simulationHazardCannotByItselfSupportATrafficCause() {
+        UUID incidentId = UUID.randomUUID();
+        var roadworks = new IncidentEvidence("hazard-observation:" + incidentId, incidentId, "ROADWORKS",
+                "Simulated roadworks", new BigDecimal("1.3"), new BigDecimal("103.8"), CONFIRMED.minusSeconds(60),
+                CONFIRMED.minusSeconds(30), "SIMULATION", RUN);
+        var result = associate(List.of(roadworks), output("ROADWORKS", roadworks.evidenceId()));
 
-        var driftOutput = new ModelOutput("HEADWAY_DECAY", "CUMULATIVE_DRIFT", "Long-distance spacing decay",
-                List.of(), List.of());
-        var result = policy.associate(event(), context, driftOutput, Duration.ofMinutes(15), 1);
-
-        assertThat(result.causeCode()).isEqualTo("HEADWAY_DECAY");
-        assertThat(result.facts()).anySatisfy(fact -> assertThat(fact).contains("Nearest reported traffic incident was", "outside direct corridor impact proximity"));
-        assertThat(result.limitations()).contains("No nearby incidents: No traffic accidents or roadworks reported along this route.");
+        assertThat(result.causeCode()).isEqualTo("UNKNOWN");
+        assertThat(result.evidenceIds()).containsExactly("event:one");
     }
 
     private BunchingEvidenceSupportPolicy.AssociatedEvidence associate(List<IncidentEvidence> incidents, ModelOutput output) {

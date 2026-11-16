@@ -16,6 +16,13 @@ public interface BusArrivalObservationRepository extends JpaRepository<BusArriva
             UUID demoRunId, String tripId, String classification);
     long deleteByDemoRunId(UUID demoRunId);
     List<BusArrivalObservation> findByPollRunId(UUID pollRunId);
+
+    @Query("""
+            select arrival from BusArrivalObservation arrival join PollRun poll on poll.id = arrival.pollRunId
+            where arrival.demoRunId = :runId and arrival.classification = 'SIMULATION'
+              and poll.idempotencyKey = :baselineKey and arrival.visitOrder in (1, 2)
+            """)
+    List<BusArrivalObservation> findDemoBaselinePair(@Param("runId") UUID runId, @Param("baselineKey") String baselineKey);
     List<BusArrivalObservation> findByRawObservationIdIn(List<UUID> rawObservationIds);
     Page<BusArrivalObservation> findByStopCodeAndServiceIdAndFetchedAtBetweenOrderByFetchedAtDesc(
             String stopCode, String serviceId, Instant from, Instant to, Pageable pageable);
@@ -78,31 +85,36 @@ public interface BusArrivalObservationRepository extends JpaRepository<BusArriva
             @Param("sortBy") String sortBy, @Param("sortDirection") String sortDirection, Pageable pageable);
 
     /**
-     * Latest live prediction set per polled stop plus the latest replay step of the active demo run.
+     * Latest live prediction set per polled stop plus the active simulation's newest arrival prediction set.
      * Rows without a direction or arrival estimate are insufficient evidence and are not paced.
      */
     @Query(value = """
             select live.classification as classification, live.stop_code as stopCode,
                    live.service_id as serviceId, live.direction_id as directionId,
                    live.estimated_arrival_at as estimatedArrivalAt, live.fetched_at as fetchedAt,
-                   cast(null as varchar) as vehicleReference
+                   cast(null as varchar) as vehicleReference,
+                   cast(null as uuid) as demoRunId, false as replayComplete, false as roadworksScenario
             from ingestion.current_bus_arrival live
             where live.direction_id is not null and live.estimated_arrival_at is not null
             union all
             select simulation.classification, simulation.stop_code, simulation.service_id, simulation.direction_id,
-                   simulation.estimated_arrival_at, simulation.fetched_at, assignment.vehicle_registration_number
-            from ingestion.bus_arrival_observation simulation
+                   simulation.estimated_arrival_at, simulation.fetched_at, assignment.vehicle_registration_number,
+                   simulation.demo_run_id, active.status = 'REPLAY_COMPLETE',
+                   ((active.scenario_key = 'roadworks-bunching' and active.scenario_version = 'v1')
+                        or active.simulation_scenario = 'ROADWORKS_BUNCHING')
+            from (
+                select poll.id, run.status, run.scenario_key, run.scenario_version, run.simulation_scenario from ingestion.poll_run poll
+                join ingestion.demo_run run on run.id = poll.demo_run_id
+                where run.status in ('RUNNING', 'REPLAY_COMPLETE') and poll.outcome = 'SUCCESS'
+                  and poll.source in ('DEMO', 'DEMO_ARRIVALS')
+                order by poll.started_at desc, poll.id desc
+                limit 1
+            ) active
+            join ingestion.bus_arrival_observation simulation on simulation.poll_run_id = active.id
             join ingestion.demo_vehicle_assignment assignment
               on assignment.demo_run_id = simulation.demo_run_id and assignment.trip_id = simulation.trip_id
             where simulation.classification = 'SIMULATION'
               and simulation.direction_id is not null and simulation.estimated_arrival_at is not null
-              and simulation.poll_run_id = (
-                  select poll.id from ingestion.poll_run poll
-                  join ingestion.demo_run run on run.id = poll.demo_run_id
-                  where run.status in ('PREPARING', 'RUNNING', 'REPLAY_COMPLETE') and poll.outcome = 'SUCCESS'
-                    and poll.source = 'DEMO'
-                  order by poll.started_at desc
-                  limit 1)
             """, nativeQuery = true)
     List<PacingArrivalView> findPacingArrivals();
 

@@ -76,6 +76,7 @@ public class CaptainRouteService {
         } catch (PacingUnavailableException exception) {
             return Optional.empty();
         }
+        if (!snapshot.demoRunId().equals(Optional.of(assignment.id().demoRunId()))) return Optional.empty();
         return snapshot.metrics().stream()
                 .filter(metric -> "SIMULATION".equals(metric.classification())
                         && metric.vehicleReference().equals(assignment.vehicleRegistrationNumber())

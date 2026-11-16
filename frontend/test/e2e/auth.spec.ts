@@ -238,7 +238,9 @@ async function mockDashboard(context: BrowserContext, options: { arrivalFailure?
     items: [{ observationId: 'arrival-1', serviceId: '190', stopCode: 'B01', operator: 'SMRT', directionId: 1, destinationCode: 'C01', estimatedArrivalAt: '2026-10-22T01:05:00Z', fetchedAt: '2026-10-22T01:00:00Z', loadCategory: 'SEA' }], page: 0, totalItems: 1, totalPages: 1,
   } }))
   await context.route('**/api/v1/planning/diagnoses?*', route => route.fulfill({ json: { mode: 'DEMO', demoRunId: 'run-1', items: [], page: 0, totalItems: 0, totalPages: 0 } }))
-  await context.route('**/api/v1/demo-runs/active', route => route.fulfill({ json: { id: 'run-1', status: 'REPLAY_COMPLETE', alerts: [alert] } }))
+  await context.route('**/api/v1/demo-runs/active', route => route.fulfill({ json: {
+    id: 'run-1', status: 'REPLAY_COMPLETE', serviceId: '190', directionId: 1, alerts: [alert],
+  } }))
   await context.route('**/api/v1/demo-runs/run-1/route-positions', route => route.fulfill({ json: {
     serviceId: '190', computedAt: '2026-10-22T01:00:00Z', refreshIntervalSeconds: 60, maxSourceAgeSeconds: 120,
     directions: [{ operator: 'SMRT', directionId: 1, routeLengthM: 12_000, buses: [
@@ -284,7 +286,7 @@ function arrivalEvidence(classification: string, directionId: number, stopCode =
 test('controller shows the injected simulation route strip and keeps the overview detection count', async ({ page, context }) => {
   await mockDashboard(context)
   await login(page)
-  await expect(page.getByRole('heading', { name: 'Approximate Live Route Strip', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Simulation Route Strip', exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: /Simulation detections/ })).toContainText('1')
   await expect(page.getByRole('heading', { name: 'Service 190 · Towards Stop C01', exact: true })).toBeVisible()
   await expect(page.getByLabel('Route', { exact: true }).locator('option:checked')).toHaveText('Service 190 · Towards Stop C01 · SMRT')
@@ -310,6 +312,46 @@ test('controller shows the injected simulation route strip and keeps the overvie
     'Service 190 · Towards Stop C01 · SMRT',
     'Service 190 · Towards Stop F01 · SMRT',
   ])
+})
+
+test('simulated bus markers keep moving between page refreshes after replay completes until returning to live', async ({ page, context }) => {
+  await page.clock.install()
+  await mockDashboard(context)
+  const simulation = {
+    id: 'run-1', status: 'REPLAY_COMPLETE', serviceId: '190', directionId: 1, busCount: 2,
+    dispatchGapSeconds: 90, busGapsSeconds: [90], monitoredStopCode: 'B01', scenario: 'BUNCHING', alerts: [],
+  }
+  let active = true
+  let positionRequests = 0
+  await context.route('**/api/v1/demo-runs/active', route => active ? route.fulfill({ json: simulation }) : route.fulfill({ status: 204 }))
+  await context.route('**/api/v1/demo-runs/run-1/close', route => {
+    active = false
+    return route.fulfill({ json: { ...simulation, status: 'CLOSED' } })
+  })
+  await context.route('**/api/v1/demo-runs/run-1/route-positions', route => {
+    positionRequests++
+    return route.fulfill({ json: {
+      serviceId: '190', computedAt: new Date().toISOString(), refreshIntervalSeconds: 1, maxSourceAgeSeconds: 120,
+      directions: [{ operator: 'SMRT', directionId: 1, routeLengthM: 12_000, buses: [
+        { order: 1, distanceAlongRouteM: 11_950, uncertaintyM: 20, speedMps: 10 },
+      ] }],
+    } })
+  })
+
+  await login(page)
+  const bus = page.getByRole('img', { name: /Estimated bus 1, approximate position/ })
+  await expect(bus).toHaveAttribute('aria-label', /approximate position 119[5-9][0-9] metres/)
+  const before = positionRequests
+  await page.clock.runFor(7500)
+  await expect(bus).toHaveAttribute('aria-label', /approximate position [1-6][0-9] metres/)
+  expect(positionRequests).toBe(before)
+
+  await page.getByRole('button', { name: 'Return to live', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: /^Live$/ })).toBeVisible()
+  await expect(bus).toHaveAttribute('aria-label', /approximate position 4300 metres/)
+  await page.clock.runFor(1500)
+  await expect(bus).toHaveAttribute('aria-label', /approximate position 4300 metres/)
+  expect(positionRequests).toBe(before)
 })
 
 test('controller route strip shows inferred live bus positions with uncertainty', async ({ page, context }) => {
@@ -782,12 +824,159 @@ test('controller sees a requested diagnosis progress automatically', async ({ pa
   await expect(refresh).toBeEnabled()
   status = 'COMPLETED'
   await page.clock.fastForward(30_000)
-  await expect(page.getByRole('heading', { name: 'AI diagnosis', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Diagnosis', exact: true })).toBeVisible()
   await expect(page.getByText('The trailing bus encountered a passenger surge.')).toBeVisible()
   await expect(page.getByText('Confidence: 82%')).toBeVisible()
   await expect(page.getByText('Crowding data was unavailable.')).toBeVisible()
   await expect(queue.getByRole('option').filter({ hasText: 'Stop 44251' })).toContainText('Diagnosis generated.')
   expect(triggerCount).toBe(1)
+})
+
+const simulationHazardFixtures = [
+  { id: 'demo-flood', kind: 'FLOOD', title: 'DEMO: Flood alert', message: 'Flooding near the route',
+    description: 'Flooded area', geometryRole: 'BROADCAST_COVERAGE', radiusKm: 1, latitude: 1.384, longitude: 103.75 },
+  { id: 'demo-station', kind: 'RAIL_DISRUPTION', title: 'DEMO: BP6 disruption', message: 'Rail disruption near connecting buses',
+    description: 'Bukit Panjang', geometryRole: 'STATION_REFERENCE', radiusKm: 0.5, latitude: 1.379, longitude: 103.754 },
+  { id: 'demo-roadwork', kind: 'ROADWORKS', title: 'DEMO: Approved works', message: 'Roadworks on the route',
+    description: 'Sample Road', geometryRole: 'ROAD_NAME', radiusKm: 0.5, latitude: 1.378, longitude: 103.748 },
+]
+
+async function mockSimulationHazards(context: BrowserContext, options: { available?: () => boolean; withExposures?: () => boolean } = {}) {
+  const current = () => simulationHazardFixtures.map(hazard => ({
+    disruptionId: hazard.id, kind: hazard.kind, status: 'ACTIVE', classification: 'SIMULATION', demoRunId: 'run-1',
+    updatedAt: '2026-10-22T01:00:00Z', facts: { title: hazard.title, description: hazard.message, locations: [hazard] },
+    exposures: options.withExposures?.() === false ? []
+      : [{ busId: 'demo-190-1', serviceId: '190', directionId: 1, basis: hazard.geometryRole, stopCode: 'B01' }],
+    limitations: [],
+  }))
+  await context.route('**/api/v1/disruption/hazards?*', route => {
+    const hazards = current()
+    const example = hazards[0]
+    const previous = { ...example, disruptionId: 'previous-demo', demoRunId: 'old-run',
+      facts: { ...example.facts, title: 'Older simulation' } }
+    const unrelated = { ...example, disruptionId: 'unrelated-demo', exposures: [],
+      facts: { ...example.facts, title: 'Off-route simulation', locations: [{ ...simulationHazardFixtures[0], latitude: 1.48 }] } }
+    const cleared = { ...example, disruptionId: 'cleared-demo', status: 'CLEARED',
+      facts: { ...example.facts, title: 'Cleared simulation alert' } }
+    const live = { ...example, disruptionId: 'live-alert', classification: 'OBSERVATION_ONLY', demoRunId: null,
+      facts: { ...example.facts, title: 'Live alert outside this run' } }
+    const items = options.available?.() === false ? [] : [...hazards, previous, unrelated, cleared, live]
+    return route.fulfill({ json: { items, page: 0, size: 100, totalElements: items.length, feeds: [] } })
+  })
+  for (const hazard of simulationHazardFixtures) {
+    await context.route(`**/api/v1/disruption/hazards/${hazard.id}`, route => route.fulfill({
+      json: current().find(item => item.disruptionId === hazard.id),
+    }))
+  }
+}
+
+test('simulation hazard alerts arrive on Overview and are shown once per run', async ({ page, context }) => {
+  await page.clock.install()
+  await mockDashboard(context)
+  let published = false
+  await mockSimulationHazards(context, { available: () => published })
+
+  const hazardResponse = (response: { url(): string }) => new URL(response.url()).pathname === '/api/v1/disruption/hazards'
+  const initialHazards = page.waitForResponse(hazardResponse)
+  await login(page)
+  await initialHazards
+  const popup = page.getByRole('status', { name: 'Simulation hazard alerts', exact: true })
+  await expect(popup).toHaveCount(0)
+
+  published = true
+  await page.clock.fastForward(30_000)
+  await expect(popup).toBeVisible()
+  await expect(popup.getByRole('heading', { name: 'Simulation hazard alerts', exact: true })).toBeVisible()
+  for (const { title, description } of simulationHazardFixtures) {
+    await expect(popup).toContainText(title)
+    await expect(popup).toContainText(description)
+    await expect(popup.getByRole('button', { name: `Locate ${title} on map`, exact: true })).toBeVisible()
+  }
+  await expect(popup.getByRole('button', { name: /^Locate .* on map$/ })).toHaveCount(3)
+  await expect(popup).not.toContainText(/Older simulation|Off-route simulation|Cleared simulation alert|Live alert outside this run/)
+
+  const planning = page.getByRole('link', { name: 'Planning & mitigation', exact: true })
+  await planning.click()
+  await expect(popup).toBeVisible()
+  const locateFlood = popup.getByRole('button', { name: 'Locate DEMO: Flood alert on map', exact: true })
+  await locateFlood.click()
+  await expect(page).toHaveURL(/\/controller\/disruptions\?hazard=demo-flood&service=190&direction=1/)
+  await expect(page.getByRole('region', { name: 'Hazard details' })).toContainText('DEMO: Flood alert')
+  const conditions = page.getByRole('region', { name: 'Hazard conditions', exact: true })
+  await expect(conditions.locator('#hazard-demo-flood').getByRole('button', { name: 'Acknowledge', exact: true })).toBeVisible()
+  await planning.click()
+  await expect(popup).toBeVisible()
+  await expect(locateFlood).toHaveCount(0)
+  await expect(popup.getByRole('button', { name: /^Locate .* on map$/ })).toHaveCount(2)
+  await popup.getByRole('button', { name: 'Dismiss simulation hazard alerts', exact: true }).click()
+  await expect(popup).toHaveCount(0)
+
+  const refreshedHazards = page.waitForResponse(hazardResponse)
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await refreshedHazards
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
+  await expect(popup).toHaveCount(0)
+  const reloadedHazards = page.waitForResponse(hazardResponse)
+  await page.reload()
+  await reloadedHazards
+  await expect(popup).toHaveCount(0)
+  await page.getByRole('link', { name: 'Disruptions', exact: true }).click()
+  for (const { id } of simulationHazardFixtures) {
+    await expect(conditions.locator(`#hazard-${id}`).getByRole('button', { name: 'Acknowledge', exact: true })).toBeVisible()
+  }
+  await expect(popup).toHaveCount(0)
+})
+
+test('Planning shows the current simulation hazards before and after diagnosis', async ({ page, context }) => {
+  await mockDashboard(context)
+  const createdAt = '2026-10-22T01:00:00Z'
+  const flood = simulationHazardFixtures[0]
+  let diagnosed = false
+  await mockSimulationHazards(context, { withExposures: () => !diagnosed })
+  await context.route('**/api/v1/planning/recommendations/pending?*', route => route.fulfill({ json: {
+    mode: 'DEMO', demoRunId: 'run-1', items: [], page: 0, totalItems: 0, totalPages: 0,
+  } }))
+  await context.route('**/api/v1/planning/diagnoses?*', route => route.fulfill({ json: {
+    mode: 'DEMO', demoRunId: 'run-1', page: 0, totalItems: 1, totalPages: 1,
+    items: [{ requestId: 'case-1', eventId: 'event-1', diagnosisId: diagnosed ? 'diagnosis-1' : null,
+      classification: 'SIMULATION', demoRunId: 'run-1', serviceId: '190', directionId: 1, stopCode: 'B01', createdAt,
+      status: diagnosed ? 'COMPLETED' : 'PENDING', likelyCause: diagnosed ? 'Flooding was reported nearby.' : null,
+      affectedBusReferences: [], limitations: [], evidenceDetails: diagnosed ? [{
+        evidenceId: 'hazard-observation:flood', incidentType: 'Flooding', message: flood.message,
+        latitude: flood.latitude, longitude: flood.longitude,
+      }] : [],
+    }],
+  } }))
+  await context.route('**/api/v1/planning/diagnoses/trigger', route => {
+    diagnosed = true
+    return route.fulfill({ json: { requestId: 'case-1', diagnosisId: 'diagnosis-1', status: 'COMPLETED', createdAt } })
+  })
+
+  await login(page)
+  const popup = page.getByRole('status', { name: 'Simulation hazard alerts', exact: true })
+  await popup.getByRole('button', { name: 'Dismiss simulation hazard alerts', exact: true }).click()
+  await page.getByRole('link', { name: 'Planning & mitigation', exact: true }).click()
+  await page.getByRole('listbox', { name: 'Recommendations awaiting a decision' }).getByRole('option')
+    .filter({ hasText: 'Diagnosis has not been generated yet.' }).click()
+  const map = page.locator('#corridor-map')
+  await expect(map.getByRole('button', { name: /Hazards \(3\)/ })).toBeVisible()
+  const pins = map.locator('g[role="button"][aria-label^="Hazard:"]')
+  await expect(pins).toHaveCount(3)
+  await expect(map.getByRole('button', { name: /Older simulation|Off-route simulation|Cleared simulation alert|Live alert outside this run/ })).toHaveCount(0)
+  await expect.poll(() => pins.evaluateAll(elements => elements.every(element => {
+    const marker = element.getBoundingClientRect()
+    const map = (element as SVGElement).ownerSVGElement!.getBoundingClientRect()
+    return marker.left >= map.left && marker.right <= map.right && marker.top >= map.top && marker.bottom <= map.bottom
+  }))).toBe(true)
+
+  const refreshedHazards = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/disruption/hazards')
+  await page.getByRole('button', { name: 'Generate diagnosis', exact: true }).click()
+  await refreshedHazards
+  await expect(page.getByText('Flooding was reported nearby.')).toBeVisible()
+  await expect(pins).toHaveCount(3)
+  await expect(map.getByRole('button', { name: /Hazard: Flood - DEMO: Flood alert/ })).toBeVisible()
+  await expect(map.getByRole('button', { name: /Hazard: Rail Disruption - DEMO: BP6 disruption/ })).toBeVisible()
+  await expect(map.getByRole('button', { name: /Hazard: Roadwork - DEMO: Approved works/ })).toBeVisible()
 })
 
 test('planning service search hides linked case details and actions when nothing matches', async ({ page, context }) => {
@@ -853,7 +1042,7 @@ test('early controller suggestions show identified bus registrations, not observ
 
 test('controller switches the shared backend mode from the dashboard without leaving the page', async ({ page, context }) => {
   await mockDashboard(context)
-  const simulation = { id: 'run-1', status: 'REPLAY_COMPLETE', serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 90, busGapsSeconds: [90, 90, 90], monitoredStopCode: '44251', scenario: 'BUNCHING', alerts: [{ eventId: 'event-1', action: 'OPENED', classification: 'SIMULATION', serviceId: '190', stopCode: 'B01', detectedAt: '2026-10-22T01:00:00Z' }] }
+  const simulation = { id: 'run-1', status: 'REPLAY_COMPLETE', serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 120, busGapsSeconds: [120, 120, 120], monitoredStopCode: '44141', scenario: 'ROADWORKS_BUNCHING', alerts: [{ eventId: 'event-1', action: 'OPENED', classification: 'SIMULATION', serviceId: '190', stopCode: 'B01', detectedAt: '2026-10-22T01:00:00Z' }] }
   let active = false
   let starts = 0
   let closes = 0
@@ -871,7 +1060,7 @@ test('controller switches the shared backend mode from the dashboard without lea
   await context.route('**/api/v1/demo-runs', route => {
     expect(route.request().method()).toBe('POST')
     expect(route.request().headers().authorization).toMatch(/^Bearer /)
-    expect(route.request().postDataJSON()).toEqual({ serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 90, busGapsSeconds: [90, 90, 90], monitoredStopCode: 'A01', scenario: 'BUNCHING', captainUserIds: ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004'] })
+    expect(route.request().postDataJSON()).toEqual({ serviceId: '190', directionId: 1, busCount: 4, dispatchGapSeconds: 120, busGapsSeconds: [120, 120, 120], monitoredStopCode: '44141', scenario: 'ROADWORKS_BUNCHING', captainUserIds: ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004'] })
     active = true; starts++
     return route.fulfill({ status: 201, json: simulation })
   })
@@ -888,6 +1077,9 @@ test('controller switches the shared backend mode from the dashboard without lea
   } }))
   await login(page)
   await page.getByRole('button', { name: 'Start simulation', exact: true }).click()
+  await expect(page.getByRole('radio', { name: 'Roadworks-induced bunching' })).toBeChecked()
+  await expect(page.getByLabel('Injection stop')).toHaveValue('Phoenix Stn (44141)')
+  await expect(page.getByLabel('Injection stop')).toBeDisabled()
   await page.getByLabel('Buses in this injection').fill('4')
   await page.getByLabel('Search available captains').fill('Captain')
   for (let index = 0; index < captainIds.length; index++) {
@@ -900,6 +1092,14 @@ test('controller switches the shared backend mode from the dashboard without lea
   await expect(page.getByRole('link', { name: /Simulation detections/ })).toContainText('1')
   await page.getByRole('link', { name: 'Planning & mitigation', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Approve recommendation', exact: true })).toBeVisible()
+  const fitDemoBuses = page.getByRole('button', { name: 'Fit demo buses', exact: true })
+  await expect(fitDemoBuses).toBeEnabled()
+  await expect(page.getByText(/Grouped demo bus numbers/)).toBeVisible()
+  await fitDemoBuses.click()
+  await expect(page.getByRole('button', { name: 'Reset map view', exact: true })).toBeEnabled()
+  const unrelatedDemoBus = page.locator('g[aria-label="Demo bus 3 on service 190"]')
+  await expect(unrelatedDemoBus).toBeVisible()
+  await expect(unrelatedDemoBus).toHaveAttribute('opacity', '1')
   await page.getByRole('button', { name: 'Return to live', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Start simulation', exact: true })).toBeEnabled()
   await expect(page.getByRole('status').filter({ hasText: /^Live$/ })).toBeVisible()
@@ -937,6 +1137,7 @@ test('failed mode changes keep the verified mode and show a useful error', async
   await page.getByRole('button', { name: 'Start simulation', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Configure simulation' })
   const start = dialog.getByRole('button', { name: 'Start simulation', exact: true })
+  await dialog.getByRole('radio', { name: 'Bunching', exact: true }).check()
   const direction = dialog.getByLabel('Direction', { exact: true })
   await direction.fill('0')
   await expect(start).toBeDisabled()
@@ -1937,7 +2138,7 @@ test('captain instruction cards scroll and load later server pages without losin
   expect(requestedPages.filter(pageNumber => pageNumber === 1)).toHaveLength(2)
 })
 
-test('controller reviews a service-direction broadcast and sends only the reviewed captain recipients', async ({ page, context }) => {
+test('controller reviews differing bus instructions in one service-direction advisory and sends only reviewed recipients', async ({ page, context }) => {
   await mockAuth(context, 'CONTROLLER')
   const issued = syntheticInstruction(new Date())
   const advisory: Advisory = {
@@ -1947,11 +2148,14 @@ test('controller reviews a service-direction broadcast and sends only the review
     limitations: ['Simulation only.'], createdAt: issued.issuedAt,
   }
   let sent = false
-  const other = { ...advisory, id: 'second-proposal', busId: 'demo-190-c' }
+  const other = { ...advisory, id: 'second-proposal', busId: 'demo-190-c',
+    candidate: { ...advisory.candidate, parameters: { ...advisory.candidate.parameters, durationSeconds: 900 } },
+    preview: 'Reduce speed by 5 km/h for 15 min near the worksite.' }
   const reverse = { ...advisory, id: 'reverse-proposal', busId: 'demo-190-reverse' }
-  const deliveries = [issued, { ...issued, id: other.id, busId: other.busId }]
+  const mixed = { ...advisoryGroup([advisory, other]), candidate: undefined, preview: undefined }
+  const deliveries = [issued, { ...issued, id: other.id, busId: other.busId, parameters: other.candidate.parameters, message: other.preview }]
   await context.route('**/api/v1/planning/advisory-groups?*', route => route.fulfill({
-    json: { items: [...(sent ? [] : [advisoryGroup([advisory, other])]), advisoryGroup([reverse], '190', 2)], page: 0, totalItems: sent ? 1 : 2, totalPages: 1 },
+    json: { items: [...(sent ? [] : [mixed]), advisoryGroup([reverse], '190', 2)], page: 0, totalItems: sent ? 1 : 2, totalPages: 1 },
   }))
   await context.route('**/api/v1/planning/instructions?*', route => route.fulfill({
     json: { items: sent ? deliveries : [], page: 0, totalItems: sent ? 2 : 0, totalPages: sent ? 1 : 0 },
@@ -1978,13 +2182,121 @@ test('controller reviews a service-direction broadcast and sends only the review
   await expect(review.getByText(advisory.busId, { exact: true })).toBeVisible()
   await expect(review.getByText(other.busId, { exact: true })).toBeVisible()
   await expect(review.getByText(reverse.busId, { exact: true })).toHaveCount(0)
+  await expect(review.getByRole('listitem').filter({ hasText: advisory.busId })).toContainText(advisory.preview)
+  await expect(review.getByRole('listitem').filter({ hasText: other.busId })).toContainText(other.preview)
   expect(sent).toBe(false)
   await review.getByRole('button', { name: 'Approve and send group', exact: true }).click()
   await expect(advisories.getByText('Service 190 · Direction 1', { exact: true })).toHaveCount(0)
   await expect(advisories.getByText('Service 190 · Direction 2', { exact: true })).toBeVisible()
-  await expect(advisories.getByRole('region', { name: 'Issued instructions', exact: true }).getByText(issued.message, { exact: true })).toHaveCount(2)
+  const issuedList = advisories.getByRole('region', { name: 'Issued instructions', exact: true })
+  await expect(issuedList.getByText(issued.message, { exact: true })).toHaveCount(1)
+  await expect(issuedList.getByText(other.preview, { exact: true })).toHaveCount(1)
   await expect(advisories.getByText(/^demo-190-b · ISSUED · Awaiting acknowledgement by/)).toBeVisible()
   await expect(advisories.getByText(/^demo-190-c · ISSUED · Awaiting acknowledgement by/)).toBeVisible()
+  expect(sent).toBe(true)
+})
+
+test('controller locates a captain advisory on its affected corridor and keeps the hazard selected', async ({ page, context }) => {
+  await mockAuth(context, 'CONTROLLER')
+  const observedAt = new Date().toISOString()
+  const hazard = {
+    disruptionId: 'advisory-flood', kind: 'FLOOD', status: 'ACTIVE', classification: 'SIMULATION', demoRunId: 'run-1',
+    updatedAt: observedAt,
+    facts: {
+      title: 'Flood near Teck Whye', description: 'Water reported near the corridor.', instruction: null, effectiveUntil: null,
+      locations: [{ latitude: 1.381, longitude: 103.753, description: 'Teck Whye' }],
+    },
+    exposures: [{ busId: 'demo-190-a', serviceId: '190', directionId: 2, stopName: 'Stop E01', stopCode: 'E01',
+      stopSequence: 2, basis: 'STOP_SEQUENCE' }], limitations: [],
+  }
+  const member: Advisory = {
+    id: 'flood-proposal', disruptionId: hazard.disruptionId, demoRunId: hazard.demoRunId, busId: hazard.exposures[0].busId,
+    status: 'PENDING', candidate: { type: 'BE_CAUTIOUS', parameters: { stopCode: 'E01', stopName: 'Stop E01',
+      stopSequence: 2, subsequentStopCount: null, speedReductionKmh: null, durationSeconds: null },
+      rationale: 'Use caution near the reported flood.' }, finalCandidate: null, preview: 'Use caution near the reported flood.',
+    hazardClassification: hazard.classification, limitations: [], createdAt: observedAt,
+  }
+  const group = { ...advisoryGroup([member], '190', 2), hazardTitle: hazard.facts.title, hazardKind: hazard.kind,
+    hazardDescription: hazard.facts.description, hazardLocation: 'Teck Whye', latitude: 1.381, longitude: 103.753,
+    affectedStopName: 'Stop E01', affectedStopCode: 'E01' }
+  const pageInfo = { page: 0, totalItems: 1, totalPages: 1 }
+  await context.route('**/api/v1/planning/advisory-groups?*', route => route.fulfill({ json: { items: [group], ...pageInfo } }))
+  await context.route(`**/api/v1/disruption/hazards/${hazard.disruptionId}`, route => route.fulfill({ json: hazard }))
+
+  let hasBunching = false
+  const alert = { eventId: 'background-bunching', action: 'OPENED', classification: 'SIMULATION', serviceId: '190',
+    stopCode: 'D01', directionId: 2, detectedAt: observedAt, evidence: arrivalEvidence('SIMULATION', 2, 'D01') }
+  await context.route('**/api/v1/demo-runs/active', route => route.fulfill({ json: {
+    id: hazard.demoRunId, status: 'REPLAY_COMPLETE', serviceId: '190', directionId: 2, busCount: 2,
+    dispatchGapSeconds: 90, busGapsSeconds: [90], monitoredStopCode: 'D01', scenario: 'BUNCHING',
+    alerts: hasBunching ? [alert] : [],
+  } }))
+  await context.route(`**/api/v1/demo-runs/${hazard.demoRunId}/route-positions`, route => route.fulfill({ json: {
+    serviceId: '190', computedAt: observedAt, refreshIntervalSeconds: 60, maxSourceAgeSeconds: 120, directions: [],
+  } }))
+
+  await login(page, '/controller/planning')
+  await page.getByRole('button', { name: 'Locate hazard on map', exact: true }).click()
+  await expect(page).toHaveURL(url => url.pathname === '/controller/disruptions' &&
+    url.searchParams.get('hazard') === hazard.disruptionId && url.searchParams.get('service') === '190' &&
+    url.searchParams.get('direction') === '2' && url.searchParams.get('stop') === 'E01' && !url.searchParams.has('incident'))
+  await expect(page.getByRole('button', { name: /^Svc 190 · to Stop F01/ })).toHaveAttribute('aria-pressed', 'true')
+
+  const map = page.locator('#corridor-map')
+  const title = map.getByRole('heading', { level: 3, name: /Flood near Teck Whye/ })
+  const details = map.getByRole('region', { name: 'Hazard details', exact: true })
+  const pin = map.getByRole('button', { name: /^Hazard: Flood.*Selected/ })
+  await expect(title).toBeInViewport()
+  await expect(map.getByText(/Highlighted pin.*Affected stop Stop E01 \(E01\)/i)).toBeVisible()
+  await expect(details).toContainText(hazard.facts.title)
+  await expect(pin).toHaveAttribute('aria-pressed', 'true')
+
+  await page.reload()
+  await expect(title).toBeInViewport()
+  await expect(details).toContainText(hazard.facts.title)
+  await expect(pin).toHaveAttribute('aria-pressed', 'true')
+
+  hasBunching = true
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Active (1)', exact: true })).toBeVisible()
+  await expect(pin).toBeInViewport()
+  await expect(details).toContainText(hazard.facts.title)
+})
+
+test('controller reviews the specific movement instruction before replacing it and sending the advisory group', async ({ page, context }) => {
+  await mockAuth(context, 'CONTROLLER')
+  const previous = syntheticInstruction(new Date())
+  const advisory: Advisory = {
+    id: 'movement-proposal', disruptionId: 'roadwork-hazard', demoRunId: previous.demoRunId, busId: previous.busId,
+    status: 'PENDING', candidate: { type: previous.type, parameters: previous.parameters, rationale: 'Reported roadworks.' },
+    finalCandidate: null, preview: 'Reduce speed for upcoming roadworks.', hazardClassification: 'SIMULATION',
+    limitations: [], createdAt: previous.issuedAt,
+  }
+  const second = { ...advisory, id: 'other-proposal', busId: 'demo-190-c' }
+  const group = { ...advisoryGroup([advisory, second]),
+    movementConflicts: [{ proposalId: advisory.id, busId: advisory.busId, instructionId: previous.id, message: previous.message }] }
+  let sent = false
+  await context.route('**/api/v1/planning/advisory-groups?*', route => route.fulfill({ json: {
+    items: sent ? [] : [group], page: 0, totalItems: sent ? 0 : 1, totalPages: sent ? 0 : 1,
+  } }))
+  await context.route('**/api/v1/planning/advisory-groups/decisions', route => {
+    expect(route.request().postDataJSON()).toEqual({
+      proposalIds: [advisory.id, second.id], replacements: { [advisory.id]: previous.id },
+    })
+    sent = true
+    return route.fulfill({ json: { items: [], page: 0, totalItems: 0, totalPages: 0 } })
+  })
+
+  await login(page)
+  await page.getByRole('link', { name: 'Planning & mitigation', exact: true }).click()
+  await page.getByRole('button', { name: 'Review and send to affected captains' }).click()
+  const review = page.getByRole('dialog', { name: 'Send advisory to affected captains' })
+  const conflictingBus = review.getByRole('listitem').filter({ hasText: advisory.busId })
+  await expect(conflictingBus).toContainText(previous.message)
+  await expect(review.getByRole('listitem').filter({ hasText: second.busId })).toHaveText(second.busId)
+  expect(sent).toBe(false)
+  await review.getByRole('button', { name: 'Replace and send group', exact: true }).click()
+  await expect(review).toHaveCount(0)
   expect(sent).toBe(true)
 })
 
@@ -2011,6 +2323,7 @@ test('changed advisory groups preserve the review and show the server conflict w
   const review = page.getByRole('dialog', { name: 'Send advisory to affected captains', exact: true })
   await review.getByRole('button', { name: 'Approve and send group', exact: true }).click()
   await expect(review.getByRole('alert')).toContainText('recipients changed')
+  await expect(review.getByRole('button', { name: 'Approve and send group', exact: true })).toBeDisabled()
   expect(sends).toBe(1)
   await expect(page.getByRole('region', { name: 'Issued instructions', exact: true })).toHaveCount(0)
   await review.getByRole('button', { name: 'Cancel', exact: true }).click()

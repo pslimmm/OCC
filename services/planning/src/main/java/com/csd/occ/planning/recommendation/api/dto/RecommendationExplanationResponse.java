@@ -25,7 +25,7 @@ public record RecommendationExplanationResponse(
                 explanation.likelyCause(),
                 explanation.diagnosisConfidence(),
                 explanation.tradeOffs(),
-                explanation.limitations(),
+                DiagnosisSummaryPolicy.displayLimitations(explanation.limitations()),
                 List.of());
     }
 
@@ -34,7 +34,8 @@ public record RecommendationExplanationResponse(
         return new RecommendationExplanationResponse(explanation.rationale(),
                 diagnosisSummary == null ? "Diagnosis details are unavailable for this retained result."
                         : diagnosisSummary.likelyCause(),
-                explanation.diagnosisConfidence(), explanation.tradeOffs(), explanation.limitations(),
+                explanation.diagnosisConfidence(), explanation.tradeOffs(),
+                DiagnosisSummaryPolicy.displayLimitations(explanation.limitations()),
                 diagnosisSummary == null ? List.of() : diagnosisSummary.evidenceDetails().stream()
                         .map(DiagnosisEvidenceDetailResponse::from).toList());
     }

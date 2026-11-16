@@ -4,6 +4,7 @@ import com.csd.occ.planning.diagnosis.domain.*;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 
@@ -46,8 +47,8 @@ public class HazardAdvisoryProcessor {
                 proposals.record(requestId, List.of()); return true;
             }
             var scope = scopes.current();
-            if (submitted != null && submitted.targetRunId() != null
-                    && !submitted.targetRunId().equals(scope.demoRunId())) {
+            if (submitted != null && (submitted.targetRunId() != null && !submitted.targetRunId().equals(scope.demoRunId())
+                    || submitted.demoRunId() != null && !submitted.demoRunId().equals(scope.demoRunId()))) {
                 proposals.record(requestId, List.of());
                 return true;
             }
@@ -62,9 +63,10 @@ public class HazardAdvisoryProcessor {
             List<AdvisoryProposal> result = new ArrayList<>();
             if (List.of("RUNNING", "REPLAY_COMPLETE").contains(fleet.status())) for (var bus : fleet.items()) {
                 if (targetBusId != null && !targetBusId.equals(bus.busId())) continue;
-                if (bus.progress() == null || hazard.exposures().stream().noneMatch(e -> e.busId().equals(bus.busId()))) continue;
-                var draft = drafts.propose(hazard, bus);
-                String preview = policy.message(draft.candidate(), bus, hazard, context.limits());
+                if (hazard.downstreamExposures(bus).findAny().isEmpty()) continue;
+                var limits = context.limits();
+                var draft = drafts.propose(hazard, bus, limits);
+                String preview = policy.message(draft.candidate(), bus, hazard, limits);
                 result.add(new AdvisoryProposal(submission.eventId(), scope.demoRunId(), hazard, bus, draft, preview, clock.instant()));
             }
             proposals.record(requestId, result);
@@ -79,6 +81,8 @@ public class HazardAdvisoryProcessor {
 
     private static boolean matchesEvidence(AdvisoryContextPort.Hazard current, UUID sourceObservationId,
             Long sourceRevision) {
+        if (SimulationCautionPolicy.appliesTo(current.classification(), current.kind()))
+            return Objects.equals(sourceObservationId, current.sourceObservationId());
         return sourceRevision != null
                 ? sourceRevision.equals(current.sourceRevision())
                 : sourceObservationId.equals(current.sourceObservationId());

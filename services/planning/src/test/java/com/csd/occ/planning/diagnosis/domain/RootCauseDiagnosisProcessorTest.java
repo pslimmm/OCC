@@ -173,6 +173,143 @@ class RootCauseDiagnosisProcessorTest {
     }
 
     @Test
+    void retainsSimulationHazardsFromTheFinalConfirmingPollAsContext() {
+        Instant lastConfirmation = NOW.plusSeconds(10);
+        event = new BunchingEventFacts(event.eventId(), event.bunchingEventId(), event.classification(), demoRunId,
+                event.serviceId(), event.directionId(), event.monitoredStopCode(), firstObservationId,
+                secondObservationId, event.status(), event.expectedHeadwaySeconds(), event.observedHeadwaySeconds(),
+                NOW, List.of(NOW, lastConfirmation), List.of(firstObservationId, secondObservationId),
+                event.evidenceIds(), event.detectionRuleVersion());
+        var roadworks = simulationHazard("ROADWORKS", null, lastConfirmation);
+        var flood = simulationHazard("FLOOD", lastConfirmation, lastConfirmation);
+        var lateDisruption = simulationHazard("RAIL_DISRUPTION", lastConfirmation.plusSeconds(1), lastConfirmation.plusSeconds(1));
+        context = new RootCauseContext("SIMULATION", demoRunId, null,
+                List.of(arrivalAt(firstObservationId, "arrival-evidence-1", NOW),
+                        arrivalAt(secondObservationId, "arrival-evidence-2", lastConfirmation)),
+                List.of(roadworks, flood, lateDisruption), List.of());
+        when(eventFacts.findConfirmedEvent(request.eventId())).thenReturn(event);
+        when(contextEvidence.findContext(event)).thenReturn(context);
+        when(payloads.encode(any(UUID.class), eq(event), any(RootCauseDiagnosis.class), eq("SIMULATION")))
+                .thenReturn("persisted-recommendation-payload");
+        when(model.diagnose(any(EvidenceSnapshot.class), eq(List.of()), eq(1)))
+                .thenReturn(new RootCauseModelPort.ModelCallResult(
+                        new ModelOutput("HEADWAY_DECAY", "CUMULATIVE_DRIFT", "Spacing decreased",
+                                event.evidenceIds(), List.of("No nearby incidents.")), invocation(1)));
+
+        processor.process(requestId);
+
+        var modelInput = ArgumentCaptor.forClass(EvidenceSnapshot.class);
+        verify(model).diagnose(modelInput.capture(), eq(List.of()), eq(1));
+        assertThat(modelInput.getValue().context().incidents()).containsExactlyInAnyOrder(roadworks, flood);
+        var diagnosis = ArgumentCaptor.forClass(RootCauseDiagnosis.class);
+        verify(completion).complete(eq(requestId), diagnosis.capture(), anyList(), anyString(),
+                eq("persisted-recommendation-payload"), any(UUID.class));
+        assertThat(diagnosis.getValue().likelyCause())
+                .contains("Simulated hazards along this route: Flooding, Roadworks.")
+                .doesNotContain("Rail disruption", "without road incidents");
+        assertThat(diagnosis.getValue().supportingEvidenceIds()).containsExactlyElementsOf(event.evidenceIds());
+        assertThat(diagnosis.getValue().limitations())
+                .anyMatch(value -> value.contains("Hazard-related bus delays are unmeasured."))
+                .noneMatch(value -> value.contains("No nearby incidents") || value.contains("traffic-incidents"));
+    }
+
+    @Test
+    void completesARecordedRoadworksDelayFromTheRetainedSnapshotWithoutInvokingTheModel() {
+        setUpRoadworksDelay(105);
+        var codec = new com.csd.occ.planning.diagnosis.infrastructure.jackson.JacksonSnapshotCodecAdapter(
+                tools.jackson.databind.json.JsonMapper.builder().build());
+        String input = codec.encode(new EvidenceSnapshot(event, context, List.of(), "SIMULATION"));
+        request.retainInput(input);
+        when(snapshots.decode(input)).thenReturn(codec.decode(input));
+        var persistedSnapshot = ArgumentCaptor.forClass(EvidenceSnapshot.class);
+
+        processor.process(requestId);
+
+        verify(snapshots).encode(persistedSnapshot.capture());
+        var diagnosis = ArgumentCaptor.forClass(RootCauseDiagnosis.class);
+        verify(completion).complete(eq(requestId), diagnosis.capture(), eq(List.of()), anyString(),
+                eq("persisted-recommendation-payload"), any(UUID.class));
+        verify(model, never()).diagnose(any(EvidenceSnapshot.class), anyList(), anyInt());
+        verify(contextEvidence, never()).findContext(any(BunchingEventFacts.class));
+        var result = diagnosis.getValue();
+        assertThat(result.causeCode()).isEqualTo("SIMULATED_ROADWORKS_DELAY");
+        assertThat(result.causeSubtype()).isEqualTo("ROADWORKS");
+        assertThat(result.provider()).isEqualTo("OCC_REPLAY");
+        assertThat(result.likelyCause()).isEqualTo("Simulated roadworks delayed the leading bus by 105s. "
+                + "That reduced its gap to the following bus from 120s to 15s at stop 44141. "
+                + "Other simulated hazards along this route: Flooding, Rail disruption.");
+        assertThat(result.limitations()).containsExactly("The roadworks delay and bus spacing are modeled by the simulation.");
+        assertThat(result.supportingEvidenceIds()).contains(context.simulationDelay().hazardEvidenceId(),
+                "bus-arrival:" + firstObservationId, "bus-arrival:" + secondObservationId)
+                .doesNotContain(context.incidents().get(1).evidenceId(), context.incidents().get(2).evidenceId());
+        var summary = new DiagnosisSummaryPolicy().summarize(result.causeCode(), result.causeSubtype(),
+                result.supportingEvidenceIds(), persistedSnapshot.getValue());
+        assertThat(summary.likelyCause()).isEqualTo(result.likelyCause());
+        assertThat(summary.evidenceDetails()).extracting(DiagnosisEvidenceDetail::incidentType)
+                .containsExactlyInAnyOrder("Roadworks", "Flooding", "Rail disruption");
+    }
+
+    @Test
+    void anInconsistentRecordedDelayCannotEstablishRoadworksAsTheCause() {
+        setUpRoadworksDelay(104);
+        when(model.diagnose(any(EvidenceSnapshot.class), anyList(), eq(1))).thenReturn(
+                new RootCauseModelPort.ModelCallResult(
+                        new ModelOutput("UNKNOWN", null, null, event.evidenceIds(), List.of()), invocation(1)));
+
+        processor.process(requestId);
+
+        var diagnosis = ArgumentCaptor.forClass(RootCauseDiagnosis.class);
+        verify(completion).complete(eq(requestId), diagnosis.capture(), anyList(), anyString(),
+                eq("persisted-recommendation-payload"), any(UUID.class));
+        assertThat(diagnosis.getValue().causeCode()).isEqualTo("UNKNOWN");
+        assertThat(diagnosis.getValue().limitations()).contains("The diagnosis could not verify the recorded simulation delay.");
+        assertThat(diagnosis.getValue().likelyCause()).contains("Simulated hazards along this route: Flooding, Rail disruption, Roadworks.")
+                .doesNotContain("delayed the leading bus");
+    }
+
+    private void setUpRoadworksDelay(int delaySeconds) {
+        Instant firstConfirmation = NOW.minusSeconds(10);
+        UUID firstLeading = UUID.randomUUID();
+        UUID firstFollowing = UUID.randomUUID();
+        event = new BunchingEventFacts(event.eventId(), event.bunchingEventId(), "SIMULATION", demoRunId,
+                "190", 1, "44141", firstObservationId, secondObservationId, "CONFIRMED", 600,
+                List.of(15, 15), firstConfirmation, List.of(firstConfirmation, NOW),
+                List.of(firstLeading, firstFollowing, firstObservationId, secondObservationId),
+                event.evidenceIds(), event.detectionRuleVersion());
+        UUID initialPoll = UUID.randomUUID();
+        UUID initialRaw = UUID.randomUUID();
+        UUID confirmingPoll = UUID.randomUUID();
+        UUID confirmingRaw = UUID.randomUUID();
+        var roadworks = simulationHazard("ROADWORKS", null, NOW);
+        var flood = simulationHazard("FLOOD", NOW, NOW);
+        var rail = simulationHazard("RAIL_DISRUPTION", NOW, NOW);
+        context = new RootCauseContext("SIMULATION", demoRunId, null,
+                List.of(roadworksArrival(firstLeading, initialPoll, initialRaw, firstConfirmation, 205),
+                        roadworksArrival(firstFollowing, initialPoll, initialRaw, firstConfirmation, 220),
+                        roadworksArrival(firstObservationId, confirmingPoll, confirmingRaw, NOW, 205),
+                        roadworksArrival(secondObservationId, confirmingPoll, confirmingRaw, NOW, 220)),
+                List.of(roadworks, flood, rail), List.of(),
+                new SimulationDelayEvidence(roadworks.evidenceId(), firstObservationId, secondObservationId,
+                        NOW.plusSeconds(100), delaySeconds));
+        when(eventFacts.findConfirmedEvent(request.eventId())).thenReturn(event);
+        when(contextEvidence.findContext(event)).thenReturn(context);
+        when(payloads.encode(any(UUID.class), eq(event), any(RootCauseDiagnosis.class), eq("SIMULATION")))
+                .thenReturn("persisted-recommendation-payload");
+    }
+
+    private ArrivalEvidence roadworksArrival(UUID id, UUID poll, UUID raw, Instant fetchedAt, int secondsToArrival) {
+        return new ArrivalEvidence("bus-arrival:" + id, id, raw, poll, "190", "44141", 1,
+                fetchedAt.plusSeconds(secondsToArrival), fetchedAt, BigDecimal.ONE, BigDecimal.ONE, "LOW", "DD",
+                "SIMULATION", demoRunId, null);
+    }
+
+    private IncidentEvidence simulationHazard(String type, Instant reportedAt, Instant fetchedAt) {
+        UUID id = UUID.randomUUID();
+        return new IncidentEvidence("hazard-observation:" + id, id, type, "Simulation hazard",
+                BigDecimal.ONE, BigDecimal.ONE, reportedAt, fetchedAt, "SIMULATION", demoRunId);
+    }
+
+    @Test
     void unsupportedModelCitationGetsOneRepairAttemptBeforeCompletion() {
         ModelInvocationDetails firstInvocation = invocation(1);
         ModelInvocationDetails repairedInvocation = invocation(2);
@@ -284,7 +421,7 @@ class RootCauseDiagnosisProcessorTest {
         verify(completion).complete(eq(requestId), diagnosis.capture(), anyList(), anyString(), eq("persisted-recommendation-payload"), any(UUID.class));
         assertThat(diagnosis.getValue().causeCode()).isEqualTo("HEADWAY_DECAY");
         assertThat(diagnosis.getValue().causeSubtype()).isEqualTo("PEAK_CONGESTION");
-        assertThat(diagnosis.getValue().likelyCause()).contains("Rush hour traffic");
+        assertThat(diagnosis.getValue().likelyCause()).contains("peak period");
     }
 
     @Test

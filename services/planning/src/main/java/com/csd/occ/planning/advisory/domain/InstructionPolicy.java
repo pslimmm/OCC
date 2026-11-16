@@ -9,16 +9,15 @@ public final class InstructionPolicy {
                 || candidate.rationale() == null || candidate.rationale().isBlank())
             throw new IllegalArgumentException("Instruction type, parameters and rationale required");
         var p = candidate.parameters();
-        var exposure = hazard.exposures();
         if (bus.progress() == null) throw new IllegalArgumentException("Synthetic progress unavailable");
-        if (exposure.stream().noneMatch(e -> e.busId().equals(bus.busId()) && e.serviceId().equals(bus.serviceId())
-                && e.directionId() == bus.directionId() && e.stopSequence() >= bus.progress().stopSequence()))
+        var exposures = hazard.downstreamExposures(bus).toList();
+        if (exposures.isEmpty())
             throw new IllegalArgumentException("Bus has no current downstream exposure");
         if (candidate.type() != InstructionType.REDUCE_SPEED) {
             if (p.stopCode() == null || p.stopName() == null || p.stopSequence() == null
-                    || exposure.stream().noneMatch(e -> e.busId().equals(bus.busId()) && e.stopCode().equals(p.stopCode())
+                    || exposures.stream().noneMatch(e -> e.stopCode().equals(p.stopCode())
                     && e.stopSequence() == p.stopSequence() && e.stopName().equals(p.stopName())))
-                throw new IllegalArgumentException("Target stop occurrence is not in captured exposure");
+                throw new IllegalArgumentException("Target stop occurrence is not in current downstream exposure");
         }
         switch (candidate.type()) {
             case BE_CAUTIOUS -> { }
@@ -35,8 +34,8 @@ public final class InstructionPolicy {
                     throw new IllegalArgumentException("Invalid subsequent stop count");
                 for (int offset = 0; offset <= p.subsequentStopCount(); offset++) {
                     int sequence = p.stopSequence() + offset;
-                    if (exposure.stream().noneMatch(e -> e.busId().equals(bus.busId()) && e.stopSequence() == sequence))
-                        throw new IllegalArgumentException("Instruction range exceeds captured affected stops");
+                    if (exposures.stream().noneMatch(e -> e.stopSequence() == sequence))
+                        throw new IllegalArgumentException("Instruction range exceeds current downstream affected stops");
                 }
             }
             case HOLD, DWELL_ADJUSTMENT, SKIP_STOP -> throw new IllegalArgumentException("Use the validated bunching recommendation for movement instructions");
@@ -59,7 +58,8 @@ public final class InstructionPolicy {
             case null, default -> "Disruption reported";
         };
         return switch (candidate.type()) {
-            case BE_CAUTIOUS -> report + " near " + p.stopName() + ". "
+            case BE_CAUTIOUS -> report + (SimulationCautionPolicy.appliesTo(hazard.classification(), hazard.kind())
+                    ? " along your route through " : " near ") + p.stopName() + ". "
                     + (sourceInstruction == null || sourceInstruction.isBlank() ? "Be cautious." : sourceInstruction.strip());
             case REDUCE_SPEED -> report + " along your route. Reduce speed by " + p.speedReductionKmh()
                     + " km/h for " + p.durationSeconds() / 60 + " min.";

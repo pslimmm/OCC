@@ -25,4 +25,23 @@ class DemoHazardScenarioTest {
             assertThat(facts.getLast().effectiveUntil()).isEqualTo(expiresAt);
         }
     }
+
+    @Test
+    void roadworksScenarioPlacesHazardsAtThreeSeparatePartsOfTheRoute() {
+        var facts = DemoHazardScenario.observations(DemoScenario.ROADWORKS_BUNCHING, 0, Instant.EPOCH, Instant.EPOCH);
+        var flood = facts.getFirst().locations().getFirst();
+        var station = facts.get(1).locations().getFirst();
+        var works = facts.getLast().locations().getFirst();
+
+        assertThat(works.sourceReference()).isEqualTo("44141");
+        assertThat(works.geometryRole()).isEqualTo("WORKSITE");
+        assertThat(works.radiusKm()).isEqualByComparingTo("0.08");
+        assertThat(station.sourceReference()).isEqualTo("BP6");
+        assertThat(station.radiusKm()).isEqualByComparingTo("0.25");
+        assertThat(flood.description()).contains("Opp Lompang Rd");
+        assertThat(flood.radiusKm()).isEqualByComparingTo("0.12");
+        // On this route the worksite, station, and flood are ordered west to east.
+        assertThat(works.longitude()).isLessThan(station.longitude());
+        assertThat(station.longitude()).isLessThan(flood.longitude());
+    }
 }

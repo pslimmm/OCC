@@ -24,6 +24,8 @@ public record PendingRecommendationResponse(
         String targetBusReference,
         List<String> affectedBusReferences,
         String controlStopCode,
+        @Schema(description = "Exact occurrence of the projected control stop on the simulation route", nullable = true)
+        Integer controlStopSequence,
         int adjustmentSeconds,
         RecommendationExplanationResponse explanation,
         RecommendationImpactResponse expectedImpact,
@@ -69,6 +71,7 @@ public record PendingRecommendationResponse(
                 recommendation.targetBusReference(),
                 record.mitigationContext().affectedBusReferences(),
                 recommendation.controlStopCode(),
+                record.mitigationContext().approvedControlStopSequence(),
                 recommendation.adjustmentSeconds(),
                 RecommendationExplanationResponse.from(recommendation.explanation(), diagnosisSummary),
                 RecommendationImpactResponse.from(recommendation.expectedImpact()),

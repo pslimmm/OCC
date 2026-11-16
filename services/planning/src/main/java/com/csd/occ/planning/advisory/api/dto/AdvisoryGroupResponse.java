@@ -1,8 +1,12 @@
 package com.csd.occ.planning.advisory.api.dto;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.csd.occ.planning.advisory.domain.AdvisoryCandidate;
 import com.csd.occ.planning.advisory.domain.AdvisoryGroup;
+import com.csd.occ.planning.advisory.domain.InstructionType;
+import io.swagger.v3.oas.annotations.media.Schema;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 public record AdvisoryGroupResponse(
@@ -18,11 +22,16 @@ public record AdvisoryGroupResponse(
         Double latitude,
         Double longitude,
         String hazardLocation,
+        @Schema(description = "Name of the advisory's targeted stop, or an associated stop for route-level advice.")
         String affectedStopName,
+        @Schema(description = "Code of the advisory's targeted stop, or an associated stop for route-level advice.")
         String affectedStopCode,
-        AdvisoryCandidate candidate,
-        String preview,
-        List<AdvisoryResponse> members) {
+        @Schema(description = "Shared draft. Omitted when directives differ between recipients.")
+        @JsonInclude(JsonInclude.Include.NON_NULL) AdvisoryCandidate candidate,
+        @Schema(description = "Shared message. Omitted when directives differ between recipients.")
+        @JsonInclude(JsonInclude.Include.NON_NULL) String preview,
+        List<AdvisoryResponse> members,
+        List<MovementConflictResponse> movementConflicts) {
 
     public static AdvisoryGroupResponse from(AdvisoryGroup group) {
         var first = group.members().getFirst();
@@ -43,9 +52,19 @@ public record AdvisoryGroupResponse(
                 hazardLocation = loc.get().description();
             }
         }
+        boolean sharedDirective = group.members().stream().allMatch(member -> member.candidate().type() == first.candidate().type()
+                && Objects.equals(member.candidate().parameters(), first.candidate().parameters())
+                && Objects.equals(member.preview(), first.preview()));
+        var shared = sharedDirective ? first.candidate() : null;
+        var target = shared != null && (shared.type() == InstructionType.BE_CAUTIOUS
+                || shared.type() == InstructionType.SLOW_DOWN_NEAR_STOPS) ? shared.parameters() : null;
         var exposures = first.context().exposures();
-        String affectedStopName = exposures != null && !exposures.isEmpty() ? exposures.getFirst().stopName() : null;
-        String affectedStopCode = exposures != null && !exposures.isEmpty() ? exposures.getFirst().stopCode() : null;
+        var firstExposure = exposures == null ? null : exposures.stream()
+                .filter(exposure -> group.key().serviceId().equals(exposure.serviceId())
+                        && group.key().directionId() == exposure.directionId())
+                .findFirst().orElse(null);
+        String affectedStopName = target != null ? target.stopName() : firstExposure != null ? firstExposure.stopName() : null;
+        String affectedStopCode = target != null ? target.stopCode() : firstExposure != null ? firstExposure.stopCode() : null;
 
         return new AdvisoryGroupResponse(
                 first.id(),
@@ -62,11 +81,15 @@ public record AdvisoryGroupResponse(
                 hazardLocation,
                 affectedStopName,
                 affectedStopCode,
-                first.candidate(),
-                first.preview(),
-                group.members().stream().map(AdvisoryResponse::from).toList());
+                shared,
+                sharedDirective ? first.preview() : null,
+                group.members().stream().map(AdvisoryResponse::from).toList(),
+                group.movementConflicts().stream().map(conflict -> new MovementConflictResponse(
+                        conflict.proposalId(), conflict.busId(), conflict.instructionId(), conflict.message())).toList());
     }
 
-    @io.swagger.v3.oas.annotations.media.Schema(name = "AdvisoryGroupPageResponse")
+    public record MovementConflictResponse(UUID proposalId, String busId, UUID instructionId, String message) {}
+
+    @Schema(name = "AdvisoryGroupPageResponse")
     public record PageResponse(List<AdvisoryGroupResponse> items, int page, int size, long totalItems, int totalPages) {}
 }

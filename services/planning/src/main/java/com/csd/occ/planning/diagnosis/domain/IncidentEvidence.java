@@ -14,6 +14,11 @@ public record IncidentEvidence(String evidenceId, UUID incidentId, String incide
         bounded(message, 500, "message");
     }
 
+    boolean isSimulationHazard() {
+        return "SIMULATION".equals(classification) && demoRunId != null
+                && evidenceId != null && evidenceId.equals("hazard-observation:" + incidentId);
+    }
+
     private static void bounded(String value, int max, String field) {
         if (value != null && value.length() > max) throw new EvidenceLimitExceededException(field);
     }

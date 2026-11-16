@@ -22,26 +22,15 @@ public interface AdvisoryProposalRepository extends JpaRepository<AdvisoryPropos
     List<ProposalKey> findUnreferencedKeysBefore(java.time.Instant cutoff);
     @Query("select p.demoRunId as demoRunId, p.busId as busId from AdvisoryProposal p where p.id=:id")
     Optional<ProposalKey> findKeyById(UUID id);
-    String PENDING_GROUPS = """
-        from planning.advisory_proposal p where p.demo_run_id=:runId and p.status='PENDING'
-        group by p.disruption_id,p.source_revision_key,p.bus->>'serviceId',p.bus->>'directionId',
-                 p.candidate_type,p.candidate->'parameters'
-        """;
-    @Query(value = "select (array_agg(p.id order by p.created_at,p.id))[1] " + PENDING_GROUPS
-            + " order by min(p.created_at),min(p.id::text)",
-            countQuery = "select count(*) from (select 1 " + PENDING_GROUPS + ") grouped", nativeQuery = true)
-    Page<UUID> findPendingGroupIds(UUID runId, Pageable page);
-
     @Query(value = """
         select p.* from planning.advisory_proposal p where p.status='PENDING' and exists (
-            select 1 from planning.advisory_proposal a where a.id in (:anchorIds)
+            select 1 from planning.advisory_proposal a where a.id=:anchorId
               and p.demo_run_id=a.demo_run_id and p.disruption_id=a.disruption_id
-              and p.source_revision_key=a.source_revision_key and p.candidate_type=a.candidate_type
-              and p.bus->>'serviceId'=a.bus->>'serviceId' and p.bus->>'directionId'=a.bus->>'directionId'
-              and p.candidate->'parameters'=a.candidate->'parameters')
+              and p.source_revision_key=a.source_revision_key
+              and p.bus->>'serviceId'=a.bus->>'serviceId' and p.bus->>'directionId'=a.bus->>'directionId')
         order by p.created_at,p.id
         """, nativeQuery = true)
-    List<AdvisoryProposal> findPendingGroupMembers(List<UUID> anchorIds);
+    List<AdvisoryProposal> findPendingGroupMembers(UUID anchorId);
 
     Page<AdvisoryProposal> findByDemoRunIdOrderByCreatedAtAsc(UUID runId, Pageable page);
     Page<AdvisoryProposal> findByDemoRunIdAndStatusOrderByCreatedAtAsc(UUID runId, String status, Pageable page);

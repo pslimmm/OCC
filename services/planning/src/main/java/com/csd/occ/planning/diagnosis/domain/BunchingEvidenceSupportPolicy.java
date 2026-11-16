@@ -13,7 +13,7 @@ import java.util.Set;
 
 /** Validates cited evidence and reports associations without assigning confidence or causation. */
 public final class BunchingEvidenceSupportPolicy {
-    public static final String VERSION = "bunching-evidence-association-v3";
+    public static final String VERSION = "bunching-evidence-association-v4";
 
     public AssociatedEvidence associate(BunchingEventFacts event, RootCauseContext context, ModelOutput output,
                                         Duration lookback, double radiusKm) {
@@ -52,12 +52,16 @@ public final class BunchingEvidenceSupportPolicy {
                 .filter(incident -> output.supportingEvidenceIds().contains(incident.evidenceId()))
                 .sorted(Comparator.comparing(IncidentEvidence::evidenceId)).toList();
         if (cited.isEmpty()) throw new IllegalArgumentException("Traffic incident diagnosis must cite an incident");
-        if (output.causeSubtype() != null && cited.stream()
-                .noneMatch(incident -> output.causeSubtype().equals(incident.incidentType())))
-            throw new IllegalArgumentException("Cause subtype must match cited incident evidence");
         if (cited.stream().anyMatch(incident -> !event.classification().equals(incident.classification())
                 || !Objects.equals(event.demoRunId(), incident.demoRunId())))
             throw new IllegalArgumentException("Cited incident provenance does not match event");
+        cited = cited.stream().filter(incident -> !incident.isSimulationHazard()).toList();
+        if (cited.isEmpty()) {
+            return new AssociatedEvidence("UNKNOWN", null, event.evidenceIds(), List.of(), List.of());
+        }
+        if (output.causeSubtype() != null && cited.stream()
+                .noneMatch(incident -> output.causeSubtype().equals(incident.incidentType())))
+            throw new IllegalArgumentException("Cause subtype must match cited incident evidence");
 
         // Coordinates are bus-position observations, not verified road paths or stop geometry.
         var position = busPositionFor(event, context);
@@ -148,34 +152,11 @@ public final class BunchingEvidenceSupportPolicy {
 
     private AssociatedEvidence associateHeadwayDecay(BunchingEventFacts event, RootCauseContext context, ModelOutput output) {
         List<String> facts = new ArrayList<>();
-        List<String> limitations = new ArrayList<>();
         Integer observed = event.observedHeadwaySeconds() == null || event.observedHeadwaySeconds().isEmpty()
                 ? null : event.observedHeadwaySeconds().getFirst();
         int expected = event.expectedHeadwaySeconds();
         facts.add(String.format(Locale.ROOT, "Headway compressed to %ss against scheduled %ss at stop %s.",
                 observed != null ? observed : "unknown", expected, event.monitoredStopCode()));
-
-        var position = busPositionFor(event, context);
-        if (context.incidents().isEmpty()) {
-            facts.add("No active external traffic incident was identified within the corridor proximity window.");
-        } else if (position.isPresent()) {
-            var arrival = position.get();
-            double minDistanceKm = context.incidents().stream()
-                    .filter(i -> hasValidCoordinates(i.latitude(), i.longitude()))
-                    .mapToDouble(i -> distanceKm(i.latitude().doubleValue(), i.longitude().doubleValue(),
-                            arrival.latitude().doubleValue(), arrival.longitude().doubleValue()))
-                    .min().orElse(Double.MAX_VALUE);
-            if (minDistanceKm < Double.MAX_VALUE) {
-                facts.add(String.format(Locale.ROOT,
-                        "Nearest reported traffic incident was %.1f km away, outside direct corridor impact proximity.",
-                        minDistanceKm));
-            } else {
-                facts.add("External traffic incident logs lack valid coordinates and show no proximity to the monitored corridor.");
-            }
-        } else {
-            facts.add("No active external traffic incident was identified within the corridor proximity window.");
-        }
-        limitations.add("No nearby incidents: No traffic accidents or roadworks reported along this route.");
 
         ZonedDateTime sgtTime = event.firstConfirmedAt() != null
                 ? event.firstConfirmedAt().atZone(ZoneId.of("Asia/Singapore")) : null;
@@ -207,28 +188,21 @@ public final class BunchingEvidenceSupportPolicy {
         }
 
         if ("PEAK_CONGESTION".equals(derivedSubtype)) {
-            facts.add(String.format(Locale.ROOT, "Event confirmed during Singapore peak traffic window (%02d:00 SGT) with arterial corridor delay.", hour));
-        } else if ("FLEET_CAPACITY_ASYMMETRY".equals(derivedSubtype)) {
+            facts.add(String.format(Locale.ROOT, "Event confirmed during Singapore peak traffic window (%02d:00 SGT).", hour));
+        } else if ("FLEET_CAPACITY_ASYMMETRY".equals(derivedSubtype) && capacityMismatch) {
             facts.add(String.format(Locale.ROOT, "Vehicle fleet capacity asymmetry observed between leading (%s) and trailing (%s) vehicles.", leadVeh, followVeh));
-        } else if ("TERMINAL_DISPATCH".equals(derivedSubtype)) {
-            facts.add("Irregularity occurred near route origin, indicating dispatch or berth spacing variation.");
-        } else {
-            facts.add("Cumulative off-peak spacing drift compounded along route corridor.");
         }
 
         String leadLoad = arrivals.size() >= 1 ? arrivals.get(0).loadCategory() : null;
         String followLoad = arrivals.size() >= 2 ? arrivals.get(1).loadCategory() : null;
         if (leadLoad != null && followLoad != null && leadLoad.equalsIgnoreCase(followLoad)) {
-            int headwayDeficit = Math.max(0, expected - (observed != null ? observed : expected));
-            facts.add(String.format(Locale.ROOT,
-                    "Uniform passenger load category (%s) across arrivals: intra-tier passenger boarding variations (accounting for up to %ds headway deficit) compounded dwell times across corridor stops without shifting telemetry tiers.",
-                    leadLoad, headwayDeficit));
+            facts.add("Uniform passenger load category (%s) across arrivals.".formatted(leadLoad));
         }
-
-
         List<String> ids = java.util.stream.Stream.concat(event.evidenceIds().stream(),
-                output.supportingEvidenceIds().stream()).distinct().toList();
-        return new AssociatedEvidence("HEADWAY_DECAY", derivedSubtype, ids, facts, limitations);
+                context.arrivals().stream().map(ArrivalEvidence::evidenceId)
+                        .filter(output.supportingEvidenceIds()::contains)).distinct().toList();
+        return new AssociatedEvidence("HEADWAY_DECAY", derivedSubtype, ids, facts,
+                List.of("The observed gap alone cannot identify what reduced bus spacing."));
     }
 
     static java.util.Optional<ArrivalEvidence> busPositionFor(BunchingEventFacts event, RootCauseContext context) {

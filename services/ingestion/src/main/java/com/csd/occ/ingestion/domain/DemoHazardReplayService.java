@@ -18,7 +18,7 @@ public class DemoHazardReplayService {
     }
     @Transactional
     public void emit(DemoRun run, int step, Instant now) {
-        for (var fact : DemoHazardScenario.observations(step, run.startedAt(), now)) {
+        for (var fact : DemoHazardScenario.observations(run.configuration().scenario(), step, run.startedAt(), now)) {
             String source = fact.kind().name() + "_DEMO";
             String key = "demo:" + run.id() + ":" + fact.kind() + ":" + step;
             if (polls.findByIdempotencyKey(key).isPresent()) continue;

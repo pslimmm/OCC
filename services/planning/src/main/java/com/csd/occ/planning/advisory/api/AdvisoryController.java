@@ -32,7 +32,7 @@ public class AdvisoryController {
     }
     @GetMapping("/advisory-groups")
     @Operation(operationId = "listAdvisoryGroups", summary = "Review pending hazard advisories by service and direction",
-            description = "Controller/admin only. Groups matching hazard evidence, service, direction, action and parameters before pagination. Each group contains all affected proposal recipients. Oldest first; page defaults 0, size 20, maximum 100.")
+            description = "Controller/admin only. Groups currently eligible recipients by hazard evidence, service and direction before pagination. Members retain their own directives. Each recipient must still have downstream exposure. Includes active movement instructions that require explicit replacement for their recipient. Oldest first. Page defaults to 0 and size to 20, with a maximum of 100.")
     public AdvisoryGroupResponse.PageResponse groups(@RequestParam(defaultValue = "0") @Min(0) int page,
             @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
         var result = groups.pending(page, size);
@@ -42,14 +42,14 @@ public class AdvisoryController {
 
     @PostMapping("/advisory-groups/decisions")
     @Operation(operationId = "decideAdvisoryGroup", summary = "Approve the reviewed service/direction recipients atomically",
-            description = "CONTROLLER only. Submit all distinct proposal IDs from one reviewed group. The server revalidates run, membership, route, hazard evidence, downstream exposure, assignment and movement conflicts for each bus. Any failure rolls back every delivery. Identical retries return the original per-captain instructions. New recipients require a fresh review; this does not subscribe future buses.")
+            description = "CONTROLLER only. Submit all distinct proposal IDs from one reviewed group and explicitly identify any conflicting movement instruction to replace for each proposal. The server revalidates run, membership, route, hazard evidence, downstream exposure, assignment and movement conflicts for each bus. Any failure rolls back every replacement and delivery. Identical retries return the original per-captain instructions. New recipients require a fresh review; this does not subscribe future buses.")
     @ApiResponse(responseCode = "200", description = "Individual deliveries or identical replay")
     @ApiResponse(responseCode = "400", description = "Invalid recipient list", content = @Content(mediaType = "application/problem+json", schema = @Schema(implementation = org.springframework.http.ProblemDetail.class)))
     @ApiResponse(responseCode = "404", description = "Proposal not found", content = @Content(mediaType = "application/problem+json", schema = @Schema(implementation = org.springframework.http.ProblemDetail.class)))
     @ApiResponse(responseCode = "409", description = "Changed group, evidence, assignment or movement conflict; no deliveries issued", content = @Content(mediaType = "application/problem+json", schema = @Schema(implementation = org.springframework.http.ProblemDetail.class)))
     public InstructionResponse.PageResponse decideGroup(@RequestBody @Valid DecideAdvisoryGroupRequest body,
             @AuthenticationPrincipal Jwt jwt, Authentication authentication) {
-        var issued = groups.decide(body.proposalIds(), PlanningActorResolver.from(jwt, authentication));
+        var issued = groups.decide(body.proposalIds(), body.replacements(), PlanningActorResolver.from(jwt, authentication));
         log.info("Advisory group issued: controllerSubject={} recipients={}", jwt.getSubject(), issued.size());
         return new InstructionResponse.PageResponse(issued.stream().map(InstructionResponse::from).toList(),
                 0, issued.size(), issued.size(), 1, clock.instant());

@@ -154,7 +154,8 @@ class BunchingRecommendationControllerTest {
         org.mockito.Mockito.when(explanation.rationale()).thenReturn("Widen the gap.");
         org.mockito.Mockito.when(explanation.likelyCause()).thenReturn("Possible contributing incident: traffic-incident:legacy-uuid.");
         org.mockito.Mockito.when(explanation.tradeOffs()).thenReturn(List.of("Adds waiting time."));
-        org.mockito.Mockito.when(explanation.limitations()).thenReturn(List.of("Synthetic data."));
+        org.mockito.Mockito.when(explanation.limitations()).thenReturn(List.of("Synthetic data.",
+                "No nearby incidents: No traffic accidents or roadworks reported along this route."));
         org.mockito.Mockito.when(impact.headwayBeforeSeconds()).thenReturn(60);
         org.mockito.Mockito.when(impact.headwayAfterSeconds()).thenReturn(180);
         org.mockito.Mockito.when(impact.queueBeforePassengers()).thenReturn(20);
@@ -181,6 +182,8 @@ class BunchingRecommendationControllerTest {
             });
             assertThat(item.explanation().likelyCause()).contains("Vehicle Breakdown", "Teck Whye Avenue")
                     .doesNotContain("traffic-incident:");
+            assertThat(item.explanation().limitations()).containsExactly(
+                    "Synthetic data.", "The retained diagnosis has limited evidence about incidents along the route.");
             assertThat(item.explanation().evidenceDetails()).singleElement()
                     .extracting(com.csd.occ.planning.diagnosis.api.dto.DiagnosisEvidenceDetailResponse::distanceMetersFromSuppliedBusPosition)
                     .isEqualTo(1807L);

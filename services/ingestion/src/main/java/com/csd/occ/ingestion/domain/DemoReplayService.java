@@ -68,22 +68,41 @@ public class DemoReplayService {
     @Transactional
     public DemoRun start(DemoRunConfiguration configuration, String actorSubject) {
         if (runs.findActive().isPresent()) throw new IllegalStateException("A demo run is already active");
-        if (configuration.scenario() == DemoScenario.NORMAL
+        if (configuration.scenario() != DemoScenario.BUNCHING
                 && configuration.busGaps().stream().anyMatch(gap -> gap.compareTo(settings.bunchingThreshold()) <= 0))
-            throw new IllegalArgumentException("Normal operation needs a dispatch gap above the bunching threshold");
+            throw new IllegalArgumentException("Every starting gap must be above the bunching threshold");
+        boolean roadworks = configuration.scenario() == DemoScenario.ROADWORKS_BUNCHING;
+        if (roadworks && (!"190".equals(configuration.serviceId()) || configuration.directionId() != 1
+                || !DemoHazardScenario.ROADWORKS_STOP_CODE.equals(configuration.monitoredStopCode())))
+            throw new IllegalArgumentException("Roadworks bunching uses Service 190 Direction 1 at Phoenix Stn (44141)");
+        if (roadworks && settings.bunchingThreshold().compareTo(Duration.ofSeconds(DemoReplayScenario.ROADWORKS_HEADWAY_SECONDS)) <= 0)
+            throw new IllegalArgumentException("Roadworks bunching requires a threshold above 15 seconds");
         validateInitialCaptains(configuration);
         var version = topology.activeVersion().orElseThrow(() -> new IllegalStateException("Demo requires active bus topology"));
         var route = topology.busRoute(version.id(), configuration.serviceId()).orElseThrow(() -> new IllegalArgumentException("Selected bus service is unavailable"));
-        if (route.operators().stream().flatMap(operator -> operator.directions().stream())
+        var stops = route.operators().stream().flatMap(operator -> operator.directions().stream())
                 .filter(direction -> direction.directionId() == configuration.directionId())
-                .noneMatch(direction -> direction.stops().stream().anyMatch(stop -> stop.stopCode().equals(configuration.monitoredStopCode()))))
-            throw new IllegalArgumentException("Selected stop is unavailable on this route direction");
+                .map(ReferenceTopologyPort.BusRouteDirection::stops)
+                .filter(direction -> direction.stream().anyMatch(stop -> stop.stopCode().equals(configuration.monitoredStopCode())))
+                .findFirst().orElseThrow(() -> new IllegalArgumentException("Selected stop is unavailable on this route direction"));
+        if (roadworks) validateWorksiteApproach(stops, configuration.monitoredStopCode());
         DemoRun run = runs.save(new DemoRun(UUID.randomUUID(), clock.instant(), settings.scenario(), settings.seed(), configuration));
         recordRunEvent(run, "SIMULATION_STARTED", "SUCCESS", "Simulation run started", actorSubject);
         String seed = Long.toString(settings.seed());
         assignments.saveAll(java.util.stream.IntStream.rangeClosed(1, configuration.busCount())
                 .mapToObj(number -> assignment(run.id(), configuration, seed, number)).toList());
         return run;
+    }
+
+    private void validateWorksiteApproach(List<ReferenceTopologyPort.BusRouteStop> stops, String monitoredStopCode) {
+        var stop = stops.stream().filter(candidate -> monitoredStopCode.equals(candidate.stopCode())).findFirst().orElseThrow();
+        int index = stops.indexOf(stop);
+        if (index == 0 || stop.latitude() == null || stop.longitude() == null)
+            throw new IllegalArgumentException("The roadworks scenario requires a mapped approach to Phoenix Stn");
+        var previous = stops.get(index - 1);
+        if (previous.latitude() == null || previous.longitude() == null || DemoRoutePositionService.distance(previous, stop)
+                < DemoReplayScenario.ROADWORKS_APPROACH_METRES + DemoReplayScenario.WORKSITE_TO_STOP_METRES)
+            throw new IllegalArgumentException("The roadworks scenario requires a mapped approach to Phoenix Stn");
     }
 
     @Transactional
@@ -153,6 +172,8 @@ public class DemoReplayService {
 
     private void emit(DemoRun run) {
         Instant now = clock.instant(); int step = run.currentStep();
+        var roadworks = DemoReplayScenario.roadworks(run);
+        if (roadworks != null && step > 0 && now.isBefore(roadworks.reachesWorksiteAt())) return;
         emitArrivals(run, step, now, "DEMO", "demo:" + run.id() + ":" + step);
         hazards.emit(run, step, now);
         run.advance(); if (run.currentStep() >= DemoReplayScenario.STEP_COUNT) run.complete(now);
@@ -166,37 +187,52 @@ public class DemoReplayService {
 
     private void emitArrivals(DemoRun run, int step, Instant now, String source, String idempotencyKey) {
         var configuration = run.configuration();
-        java.time.Duration defaultHeadway = DemoReplayScenario.headway(step, configuration.dispatchGap(),
-                settings.bunchingThreshold(), configuration.scenario());
-        List<Duration> headways = step > 0 && configuration.scenario() == DemoScenario.BUNCHING
-                && configuration.busGaps().stream().anyMatch(gap -> !gap.equals(configuration.dispatchGap()))
-                ? configuration.busGaps()
-                : java.util.Collections.nCopies(configuration.busCount() - 1, defaultHeadway);
+        var roadworks = DemoReplayScenario.roadworks(run);
+        List<Duration> headways = roadworks != null ? configuration.busGaps() : legacyHeadways(step, configuration);
         UUID pollId = UUID.randomUUID();
         PollRun poll = new PollRun(); poll.setId(pollId); poll.setSource(source); poll.setScopeKey("demo:" + run.id());
         poll.setIdempotencyKey(idempotencyKey); poll.setStartedAt(now); poll.setCompletedAt(now);
         poll.setOutcome("SUCCESS"); poll.setHttpStatus(200); poll.setRecordsReceived(configuration.busCount()); poll.setClassification("SIMULATION"); poll.setDemoRunId(run.id()); pollRuns.save(poll);
-        String payload = payload();
         RawObservation raw = new RawObservation(); raw.setId(UUID.randomUUID()); raw.setPollRunId(pollId); raw.setSource("DEMO");
         raw.setSourceKey("demo:" + run.id() + ":stop:" + configuration.monitoredStopCode());
         raw.setRequestParameters("{\"BusStopCode\":\"" + configuration.monitoredStopCode() + "\"}");
-        raw.setPayload(payload); raw.setPayloadChecksum(hash(payload)); raw.setFetchedAt(now); raw.setIngestedAt(now); raw.setHttpStatus(200);
-        raw.setClassification("SIMULATION"); raw.setDemoRunId(run.id()); rawObservations.save(raw);
         UUID reference = topology.activeVersion().orElseThrow().id();
-        Instant firstEta = now.plusSeconds(600L - step * 20L);
         List<BusArrivalObservation> emittedArrivals = new ArrayList<>();
-        Instant eta = firstEta;
+        Instant eta = roadworks == null ? now.plusSeconds(600L - step * 20L) : roadworks.baselineLeadArrival();
+        var delaySeconds = roadworks != null && step > 0 ? roadworks.delaySeconds() : 0;
         for (int number = 1; number <= configuration.busCount(); number++) {
-            emittedArrivals.add(arrival(raw.getId(), pollId, reference, run.id(), tripId(configuration.serviceId(), number),
-                    configuration.serviceId(), configuration.directionId(), configuration.monitoredStopCode(), number, eta, now));
+            emittedArrivals.add(arrival(raw.getId(), pollId, reference, run.id(), DemoVehicleAssignmentId.tripId(configuration.serviceId(), number),
+                    configuration.serviceId(), configuration.directionId(), configuration.monitoredStopCode(), number,
+                    number == 1 ? eta.plusSeconds(delaySeconds) : eta, now));
             if (number < configuration.busCount()) eta = eta.plus(headways.get(number - 1));
         }
+        String payload = roadworks == null ? payload() : roadworksPayload(emittedArrivals);
+        raw.setPayload(payload); raw.setPayloadChecksum(hash(payload)); raw.setFetchedAt(now); raw.setIngestedAt(now); raw.setHttpStatus(200);
+        raw.setClassification("SIMULATION"); raw.setDemoRunId(run.id()); rawObservations.save(raw);
         arrivals.saveAll(emittedArrivals);
+    }
+
+    private String roadworksPayload(List<BusArrivalObservation> arrivals) {
+        try {
+            return json.writeValueAsString(java.util.Map.of("scenario", DemoScenario.ROADWORKS_BUNCHING,
+                    "arrivals", arrivals.stream().map(arrival -> java.util.Map.of("tripId", arrival.getTripId(),
+                            "estimatedArrivalAt", arrival.getEstimatedArrivalAt().toString())).toList()));
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private List<Duration> legacyHeadways(int step, DemoRunConfiguration configuration) {
+        if (step > 0 && configuration.scenario() == DemoScenario.BUNCHING
+                && configuration.busGaps().stream().anyMatch(gap -> !gap.equals(configuration.dispatchGap())))
+            return configuration.busGaps();
+        return java.util.Collections.nCopies(configuration.busCount() - 1,
+                DemoReplayScenario.headway(step, configuration.dispatchGap(), settings.bunchingThreshold(), configuration.scenario()));
     }
 
     private DemoVehicleAssignment assignment(UUID runId, DemoRunConfiguration configuration, String seed, int number) {
         String serviceId = configuration.serviceId();
-        String tripId = tripId(serviceId, number);
+        String tripId = DemoVehicleAssignmentId.tripId(serviceId, number);
         UUID captainUserId = configuration.captainUserIds().isEmpty()
                 ? number == 1 ? settings.captainUserId().orElse(null) : null
                 : configuration.captainUserIds().get(number - 1);
@@ -218,8 +254,6 @@ public class DemoReplayService {
         value.setRouteStopSequence(routeStopSequence(reference, serviceId, directionId, stopCode));
         return value;
     }
-
-    private String tripId(String serviceId, int number) { return "demo-" + serviceId + "-" + number; }
 
     private Integer routeStopSequence(UUID referenceVersionId, String serviceId, int directionId, String stopCode) {
         return topology.busRoute(referenceVersionId, serviceId).stream()

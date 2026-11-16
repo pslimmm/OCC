@@ -73,8 +73,9 @@ stable trip IDs; always pair them with the run ID. Email and captain codes never
 authorize access. `/internal/v1/ingestion/demo-fleet?demoRunId=<uuid>&page=0&size=20`
 accepts Planning/Disruption peer capabilities and returns current assignments and
 simulation progress. Closed/preparing runs expose no current buses. Speed context
-is a synthetic fixture (30 km/h, permitted 5 km/h reduction for 300 seconds),
-not vehicle telemetry. Unresolved route occurrences have null progress.
+is a synthetic fixture. The roadworks preset uses 5 km/h cruise and permits a
+2 km/h reduction for 300 seconds. The other presets use 10 km/h cruise and permit
+a 5 km/h reduction for 300 seconds. Unresolved route occurrences have null progress.
 
 `GET /api/v1/captain-routes/current` (CAPTAIN only) returns the bus assigned to the
 signed-in captain in the current run, matched on the token subject: its ordered
@@ -100,11 +101,16 @@ Content-Type: application/json
 Setting `enabled` to `true` starts a replay if none is active, or resumes the currently active run. Setting it to `false` first switches bunching to the live feed, then closes the active run. The persisted setting is initialized to `false` by Flyway and survives an ingestion restart. The start/close run endpoints provide equivalent control with explicit run IDs.
 
 Replay uses one fictional, deterministic bunching injection on a selected service,
-direction and stop. `POST /api/v1/demo-runs` accepts two or three buses, a chosen
+direction and stop. `POST /api/v1/demo-runs` accepts two to twenty buses, a chosen
 stop on that route direction, individual bus-pair gaps (or one default gap, 15–900
-seconds), and either `NORMAL` or `BUNCHING` scenario. Normal operation keeps the
-chosen gaps above the configured bunching threshold; Bunching starts with the chosen
-gap then reduces it on later replay steps. Each run creates stable fictional bus
+seconds), and a `NORMAL`, `BUNCHING`, or `ROADWORKS_BUNCHING` scenario. Normal operation
+keeps the chosen gaps above the configured bunching threshold. The spacing-only
+scenario starts with gaps and compresses them on later replay steps. The roadworks
+scenario uses Service 190 Direction 1 at Phoenix Stn (44141) with initial gaps above
+the same threshold. The leading bus waits in the work zone and the next bus narrows
+the gap to 15 seconds. The stop predictions and route positions share this modeled
+delay, and the Planning evidence includes the recorded change for the affected bus
+pair. Each run creates stable fictional bus
 identities and sends repeated snapshots for that same localised event. The replay
 produces simulation-only bunching alerts and one grouped recommendation. The
 bunching consumer runs independently, so results can arrive after replay completes. Replay support requires

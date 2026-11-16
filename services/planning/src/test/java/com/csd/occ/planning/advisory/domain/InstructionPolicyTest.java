@@ -24,7 +24,7 @@ class InstructionPolicyTest {
     @Test
     void rendersConciseExactCautionAndNumericSpeedTemplates() {
         assertThat(message(InstructionType.BE_CAUTIOUS, stop(0), null))
-                .isEqualTo("Flood alert near Teck Whye School. Be cautious.");
+                .isEqualTo("Flood alert along your route through Teck Whye School. Be cautious.");
         assertThat(message(InstructionType.REDUCE_SPEED, speed(5, 300), null))
                 .isEqualTo("Flood alert along your route. Reduce speed by 5 km/h for 5 min.");
     }
@@ -43,7 +43,7 @@ class InstructionPolicyTest {
         assertThat(policy.message(caution, bus, hazard("TRAFFIC_INCIDENT", "Vehicle Breakdown", null, exposure), limits))
                 .isEqualTo("Vehicle breakdown reported near Teck Whye School. Be cautious.");
         assertThat(policy.message(caution, bus, hazard("RAIL_DISRUPTION", null, null, exposure), limits))
-                .startsWith("Rail disruption reported near Teck Whye School.");
+                .startsWith("Rail disruption reported along your route through Teck Whye School.");
         assertThat(policy.message(caution, bus, hazard("ROADWORKS", null, null, exposure), limits))
                 .startsWith("Roadworks reported near Teck Whye School.");
     }
@@ -72,6 +72,20 @@ class InstructionPolicyTest {
     }
 
     @Test
+    void rejectsThePassedTargetEvenWhenAnotherAffectedStopIsAhead() {
+        var moving = new AdvisoryContextPort.Bus(bus.busId(), bus.tripId(), bus.registrationNumber(),
+                bus.serviceId(), bus.directionId(), bus.captainUserId(), bus.assignmentStatus(), bus.progress(),
+                bus.assignmentRevision(), 11);
+        var hazard = hazard("FLOOD", null, null, exposure);
+
+        assertThatThrownBy(() -> policy.message(candidate(InstructionType.BE_CAUTIOUS, stop(0)), moving, hazard, limits))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Target stop occurrence");
+        var nextStop = new InstructionParameters("44261", "Community Centre", 11, 0, null, null);
+        assertThat(policy.message(candidate(InstructionType.BE_CAUTIOUS, nextStop), moving, hazard, limits))
+                .isEqualTo("Flood alert along your route through Community Centre. Be cautious.");
+    }
+
+    @Test
     void rejectsRangesOutsideCapturedStopsAndMaximumCount() {
         for (int count : List.of(-1, 3, 6)) {
             assertThatThrownBy(() -> message(InstructionType.SLOW_DOWN_NEAR_STOPS, stop(count), null))
@@ -86,7 +100,7 @@ class InstructionPolicyTest {
     @Test
     void preservesSourceRestrictionsAndRejectsTheirReplacementWithMovementAdvice() {
         assertThat(message(InstructionType.BE_CAUTIOUS, stop(0), " Avoid the affected area. "))
-                .isEqualTo("Flood alert near Teck Whye School. Avoid the affected area.");
+                .isEqualTo("Flood alert along your route through Teck Whye School. Avoid the affected area.");
         assertThatThrownBy(() -> message(InstructionType.REDUCE_SPEED, speed(5, 300), "Avoid the affected area."))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> message(InstructionType.SLOW_DOWN_NEAR_STOPS, stop(1), "Avoid the affected area."))

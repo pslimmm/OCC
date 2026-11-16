@@ -1,9 +1,11 @@
 package com.csd.occ.planning.diagnosis.domain;
 
+import com.csd.occ.planning.advisory.domain.SimulationCautionPolicy;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
@@ -81,16 +83,26 @@ public class DiagnosisRequestPersistenceService {
     }
 
     @Transactional
-    public List<UUID> claimDueRequests(int batchSize, Duration leaseDuration) {
-        return claimDueRequests(batchSize, leaseDuration, true);
+    public List<UUID> claimDueBunchingDiagnoses(int batchSize, Duration leaseDuration, boolean autoProcessBunching) {
+        Instant now = clock.instant();
+        return claim(requests.findClaimableBunchingDiagnoses(now, batchSize, autoProcessBunching), now, leaseDuration);
     }
 
     @Transactional
-    public List<UUID> claimDueRequests(int batchSize, Duration leaseDuration, boolean includeBunching) {
+    public List<UUID> claimDueHazards(int batchSize, Duration leaseDuration) {
         Instant now = clock.instant();
-        List<DiagnosisRequest> claimable = includeBunching
-                ? requests.findClaimable(now, batchSize)
-                : requests.findClaimableRequestedOrHazards(now, batchSize);
+        return claim(requests.findClaimableHazards(now, batchSize, SimulationCautionPolicy.KINDS), now, leaseDuration);
+    }
+
+    @Transactional
+    public List<UUID> claimDueSimulationCautions(int batchSize, Duration leaseDuration, PlanningScope scope) {
+        Instant now = clock.instant();
+        var claimable = requests.findClaimableSimulationCautions(now, batchSize,
+                Objects.toString(scope.demoRunId(), ""), SimulationCautionPolicy.KINDS);
+        return claim(claimable, now, leaseDuration);
+    }
+
+    private List<UUID> claim(List<DiagnosisRequest> claimable, Instant now, Duration leaseDuration) {
         return claimable.stream().map(request -> {
             request.claim(now.plus(leaseDuration), now);
             return request.id();

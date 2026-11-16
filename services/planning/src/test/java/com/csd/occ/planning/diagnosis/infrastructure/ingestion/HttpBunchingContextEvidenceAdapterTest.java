@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import com.csd.occ.planning.diagnosis.domain.BunchingEventFacts;
+import com.csd.occ.planning.diagnosis.domain.SimulationDelayEvidence;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -27,6 +28,8 @@ class HttpBunchingContextEvidenceAdapterTest {
 
         RestClient.Builder builder = RestClient.builder().baseUrl("http://ingestion.test");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        String hazardEvidenceId = "hazard-observation:" + UUID.randomUUID();
+        Instant baseline = lastConfirmation.plusSeconds(100);
         String arrivals = observations.stream()
                 .map(id -> "{\"evidenceId\":\"bus-arrival:" + id + "\",\"observationId\":\"" + id + "\"}")
                 .collect(java.util.stream.Collectors.joining(","));
@@ -37,12 +40,17 @@ class HttpBunchingContextEvidenceAdapterTest {
                     observations.stream().map(UUID::toString).toList());
         }).andRespond(withSuccess("""
                 {"classification":"SIMULATION","demoRunId":"%s","referenceVersionId":null,
-                 "arrivals":[%s],"incidents":[],"missingFields":[]}
-                """.formatted(runId, arrivals), MediaType.APPLICATION_JSON));
+                 "arrivals":[%s],"incidents":[],"missingFields":[],
+                 "simulationDelay":{"hazardEvidenceId":"%s","leadingObservationId":"%s","followingObservationId":"%s",
+                 "baselineLeadingArrivalAt":"%s","configuredDelaySeconds":105}}
+                """.formatted(runId, arrivals, hazardEvidenceId, event.leadingObservationId(),
+                        event.followingObservationId(), baseline), MediaType.APPLICATION_JSON));
 
         var context = new HttpBunchingContextEvidenceAdapter(builder.build()).findContext(event);
 
         assertThat(context.demoRunId()).isEqualTo(runId);
+        assertThat(context.simulationDelay()).isEqualTo(new SimulationDelayEvidence(hazardEvidenceId,
+                event.leadingObservationId(), event.followingObservationId(), baseline, 105));
         server.verify();
     }
 }

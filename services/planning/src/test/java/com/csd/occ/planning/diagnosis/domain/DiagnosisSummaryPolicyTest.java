@@ -165,16 +165,40 @@ class DiagnosisSummaryPolicyTest {
         var snapshot = new EvidenceSnapshot(event, context, List.of("bunching:event"), "SIMULATION");
 
         var peakResult = policy.summarize("HEADWAY_DECAY", "PEAK_CONGESTION", List.of("bunching:event"), snapshot);
-        assertThat(peakResult.likelyCause()).contains("Rush hour traffic", "Heavy corridor congestion", "600s", "50s", "stop 44251");
+        assertThat(peakResult.likelyCause()).contains("peak period", "600s", "50s", "stop 44251")
+                .doesNotContain("congestion", "slowed");
 
         var dispatchResult = policy.summarize("HEADWAY_DECAY", "TERMINAL_DISPATCH", List.of("bunching:event"), snapshot);
-        assertThat(dispatchResult.likelyCause()).contains("Interchange dispatch gap", "departed the interchange", "stop 44251");
+        assertThat(dispatchResult.likelyCause()).contains("Interchange dispatch spacing is a possible contributor", "stop 44251");
 
         var capacityResult = policy.summarize("HEADWAY_DECAY", "FLEET_CAPACITY_ASYMMETRY", List.of("bunching:event"), snapshot);
-        assertThat(capacityResult.likelyCause()).contains("Bus size mismatch", "Differing vehicle passenger capacities", "stop 44251");
+        assertThat(capacityResult.likelyCause()).contains("Differences in vehicle capacity are a possible contributor", "stop 44251");
 
         var driftResult = policy.summarize("HEADWAY_DECAY", "CUMULATIVE_DRIFT", List.of("bunching:event"), snapshot);
-        assertThat(driftResult.likelyCause()).contains("Route spacing drift", "Trailing bus caught up to", "stop 44251");
+        assertThat(driftResult.likelyCause()).contains("Buses were 50s apart", "stop 44251")
+                .doesNotContain("without road incidents");
+    }
+
+    @Test
+    void includesScopedSimulationHazardDetailsEvenForUnknownCause() {
+        var flood = incident("hazard-observation:" + INCIDENT_ID, INCIDENT_ID, "FLOOD",
+                "Flood alert near Teck Whye", CONFIRMED.minusSeconds(40), new BigDecimal("1.38"), new BigDecimal("103.755"));
+        UUID otherHazardId = UUID.randomUUID();
+        var otherRunRoadworks = new IncidentEvidence("hazard-observation:" + otherHazardId, otherHazardId, "ROADWORKS",
+                "Other run", null, null, null, CONFIRMED.minusSeconds(20), "SIMULATION", UUID.randomUUID());
+        var result = policy.summarize("UNKNOWN", null, List.of("bunching:event"), snapshot(List.of(flood, otherRunRoadworks)));
+
+        assertThat(result.likelyCause()).contains("Simulated hazards along this route: Flooding.")
+                .doesNotContain("Roadworks", "Other run", "hazard-observation:");
+        assertThat(result.evidenceDetails()).singleElement().satisfies(detail -> {
+            assertThat(detail.evidenceId()).isEqualTo(flood.evidenceId());
+            assertThat(detail.incidentType()).isEqualTo("Flooding");
+            assertThat(detail.message()).isEqualTo(flood.message());
+            assertThat(detail.latitude()).isEqualTo(flood.latitude());
+            assertThat(detail.longitude()).isEqualTo(flood.longitude());
+            assertThat(detail.distanceMetersFromSuppliedBusPosition()).isNull();
+            assertThat(detail.busPositionEvidenceId()).isNull();
+        });
     }
 
     @Test

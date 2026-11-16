@@ -17,10 +17,10 @@ export type CaptainInstruction = { id: string; demoRunId: string; busId: string;
   parameters: InstructionParameters; message: string; busClassification: string; hazardClassification: string;
   status: string; issuedAt: string; acknowledgementDeadline: string; acknowledgedAt: string | null;
   applicableUntil: string | null; inactiveReason: string | null }
-export type HazardLocation = { latitude?: number | null; longitude?: number | null; description?: string | null; type?: string | null }
+export type HazardLocation = { latitude?: number | null; longitude?: number | null; description?: string | null; type?: string | null; radiusKm?: number | null; geometryRole?: string | null }
 export type Hazard = { disruptionId: string; kind: string; status: string; classification: string; demoRunId: string | null;
   updatedAt: string; facts: { title: string; description: string; instruction: string | null; effectiveUntil: string | null; locations?: HazardLocation[] };
-  exposures: { busId: string; serviceId: string; stopCode: string; stopName: string; stopSequence: number; basis: string }[]; limitations: string[] }
+  exposures: { busId: string; serviceId: string; directionId?: number; stopCode: string; stopName: string; stopSequence: number; basis: string }[]; limitations: string[] }
 export type PublicNotice = { id: string; classification: string; title: string; message: string; services: string[];
   locations: string[]; effectiveFrom: string; effectiveUntil: string; publishedAt: string | null }
 export type ManagedNotice = PublicNotice & { disruptionId: string; demoRunId: string | null; status: string; withdrawnAt: string | null }
@@ -98,7 +98,7 @@ export type BunchingAlert = {
 export type SimulationVehicle = { registrationNumber: string; operator: string; vehicleType: string; captainCode: string; busId: string }
 export type DemoRun = {
   id: string; status: string; alerts: BunchingAlert[]; serviceId: string; directionId: number
-  busCount: number; dispatchGapSeconds: number; busGapsSeconds: number[]; monitoredStopCode: string; scenario: 'NORMAL' | 'BUNCHING'
+  busCount: number; dispatchGapSeconds: number; busGapsSeconds: number[]; monitoredStopCode: string; scenario: 'NORMAL' | 'BUNCHING' | 'ROADWORKS_BUNCHING'
 }
 export type Recommendation = {
   recommendationId: string; classification: string; status: string; mitigationType: string
@@ -142,7 +142,7 @@ export type PendingRecommendation = {
   detectedAt: string; createdAt: string
   expectedHeadwaySeconds: number; observedHeadwaySeconds: number
   mitigationType: string; targetBusReference: string; affectedBusReferences: string[]
-  controlStopCode: string; adjustmentSeconds: number
+  controlStopCode: string; controlStopSequence?: number | null; adjustmentSeconds: number
   explanation: RecommendationExplanation; expectedImpact: RecommendationImpact
   revisionRawObservationId?: string | null; currentPredictionGaps?: number[]; confirmationGaps?: number[]
   predictionValidUntil?: string | null
@@ -203,6 +203,16 @@ export async function apiRequest<T>(path: string, token: string | undefined, sig
   }
   return response.status === 204 || (response.status === 202 && !response.headers.has('Content-Type'))
     ? null : await response.json() as T
+}
+
+export async function fetchHazardPage(page: number, token: string, signal: AbortSignal, kind?: string): Promise<PageResult<Hazard>> {
+  const params = new URLSearchParams({ page: String(page), size: '100' })
+  if (kind) params.set('kind', kind)
+  const result = await apiRequest<Omit<PageResult<Hazard>, 'totalItems' | 'totalPages'> & { size: number; totalElements: number }>(
+    `/api/v1/disruption/hazards?${params}`, token, signal,
+  )
+  if (!result) throw new Error('Hazard response was empty.')
+  return { ...result, totalItems: result.totalElements, totalPages: Math.ceil(result.totalElements / result.size) }
 }
 
 export async function enrichBunchingStops(alerts: BunchingAlert[], token: string, signal: AbortSignal): Promise<BunchingAlert[]> {
@@ -286,4 +296,5 @@ export type AdvisoryGroup = { id: string; disruptionId: string; demoRunId: strin
   hazardTitle: string; hazardDescription?: string; hazardKind?: string; hazardClassification: string;
   latitude?: number | null; longitude?: number | null; hazardLocation?: string | null;
   affectedStopName?: string | null; affectedStopCode?: string | null;
-  candidate: AdvisoryCandidate; preview: string; members: Advisory[] }
+  candidate?: AdvisoryCandidate | null; preview?: string | null; members: Advisory[];
+  movementConflicts?: { proposalId: string; busId: string; instructionId: string; message: string }[] }

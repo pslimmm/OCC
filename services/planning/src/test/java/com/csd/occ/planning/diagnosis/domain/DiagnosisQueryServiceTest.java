@@ -58,7 +58,9 @@ class DiagnosisQueryServiceTest {
         when(requests.findById(requestId)).thenReturn(Optional.of(request));
         when(deliveries.findByDiagnosisId(diagnosisId)).thenReturn(Optional.empty());
         when(codec.decodeStringList("evidence-json")).thenReturn(List.of("bunching:event", "traffic-incident:incident-id"));
-        when(codec.decodeStringList("limitations-json")).thenReturn(List.of("Road relevance has not been verified."));
+        when(codec.decodeStringList("limitations-json")).thenReturn(List.of("Missing evidence field: traffic-incidents",
+                "No nearby incidents: No traffic accidents or roadworks reported along this route.",
+                "Road relevance has not been verified."));
         when(codec.decode("snapshot-json")).thenReturn(snapshot());
 
         var result = query.find(diagnosisId);
@@ -66,7 +68,8 @@ class DiagnosisQueryServiceTest {
         assertThat(result.likelyCause()).isEqualTo(
                 "Possible contributor: Vehicle Breakdown. The provider reported: Breakdown near Teck Whye Avenue.");
         assertThat(result.likelyCause()).doesNotContain("legacy raw evidence text", "traffic-incident:");
-        assertThat(result.limitations()).containsExactly("Road relevance has not been verified.");
+        assertThat(result.limitations()).containsExactly("The retained diagnosis has limited evidence about incidents along the route.",
+                "Road relevance has not been verified.");
         assertThat(result.evidenceDetails()).singleElement().satisfies(detail -> {
             assertThat(detail.evidenceId()).isEqualTo("traffic-incident:incident-id");
             assertThat(detail.distanceMetersFromSuppliedBusPosition()).isZero();

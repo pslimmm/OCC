@@ -28,7 +28,10 @@ public class RootCauseContextController {
     public RootCauseContextController(RootCauseContextService contexts) { this.contexts = contexts; }
 
     @GetMapping("/demo-runs/{demoRunId}/planning-context")
-    @Operation(operationId = "getSimulationPlanningContext", summary = "Get simulation evidence for a confirmed event")
+    @Operation(operationId = "getSimulationPlanningContext", summary = "Get simulation evidence for a confirmed event",
+            description = "Includes the latest active scenario hazard observations as of the evidence time when their location "
+                    + "matches the bus route and direction. These incident entries have hazard-observation evidence IDs. "
+                    + "The roadworks preset can include verified before/after forecasts for its first bus pair.")
     @ApiResponse(responseCode = "200", description = "Simulation-scoped evidence context")
     @ApiResponse(responseCode = "400", description = "Evidence observations do not match the simulation event",
             content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
@@ -55,6 +58,7 @@ public class RootCauseContextController {
     }
 
     private RootCauseContextResponse response(com.csd.occ.ingestion.domain.RootCauseContextSnapshot context) {
+        var delay = context.simulationDelay();
         return new RootCauseContextResponse(context.classification(), context.demoRunId(), context.referenceVersionId(),
                 context.arrivals().stream().map(value -> new RootCauseContextResponse.ArrivalEvidenceResponse(
                         value.evidenceId(), value.observationId(), value.rawObservationId(), value.pollRunId(),
@@ -64,6 +68,8 @@ public class RootCauseContextController {
                 context.incidents().stream().map(value -> new RootCauseContextResponse.IncidentEvidenceResponse(
                         value.evidenceId(), value.incidentId(), value.incidentType(), value.message(), value.latitude(),
                         value.longitude(), value.observedAt(), value.fetchedAt(), value.classification(), value.demoRunId())).toList(),
-                context.missingFields());
+                context.missingFields(), delay == null ? null : new RootCauseContextResponse.SimulationDelayResponse(
+                        delay.hazardEvidenceId(), delay.leadingObservationId(), delay.followingObservationId(),
+                        delay.baselineLeadingArrivalAt(), delay.configuredDelaySeconds()));
     }
 }

@@ -9,7 +9,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { PagedCollectionControls } from '@/components/PagedCollectionControls'
-import { ApiError, apiRequest, type Advisory, type AdvisoryGroup, type AdvisoryCandidate, type CaptainInstruction, type Hazard, type ManagedNotice, type NoticeSuggestion, type PageResult, type PlanningHazardHistory, type TrafficIncident } from '@/lib/api'
+import { ApiError, apiRequest, fetchHazardPage, type Advisory, type AdvisoryGroup, type AdvisoryCandidate, type CaptainInstruction, type Hazard, type ManagedNotice, type NoticeSuggestion, type PageResult, type PlanningHazardHistory, type TrafficIncident } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { validCoord } from '@/pages/ControllerViews'
 import { signOut } from '@/lib/auth'
@@ -17,9 +17,10 @@ import { dataClassificationLabel } from '@/lib/presentation'
 import { formatSgtDateTime, sgtDateTimeInputFromUtc, sgtDateTimeInputToUtc } from '@/lib/time'
 import { usePagedCollection } from '@/lib/paged-collection'
 
+export type AdvisoryMapContext = Pick<AdvisoryGroup, 'serviceId' | 'directionId' | 'hazardLocation' | 'affectedStopName' | 'affectedStopCode'>
+
 type Edit = { advisory: Advisory; type: AdvisoryCandidate['type']; stopSequence: string; speed: string; minutes: string; count: string; rationale: string; replacement: string }
 type Draft = { id: string; previousId?: string; disruptionId: string; title: string; message: string; services: string; locations: string; from: string; until: string }
-type HazardPageResponse = Omit<PageResult<Hazard>, 'totalItems' | 'totalPages'> & { size: number; totalElements: number }
 
 function getHazardBadgeInfo(kind?: string, title?: string) {
   const k = (kind || '').toUpperCase()
@@ -68,7 +69,7 @@ export function ControllerAdvisories({ token, registerRefresh, registerLocateHaz
   onRefreshTimeChange: (at: string | null) => void
   view: 'hazards' | 'planning' | 'notices' | 'audit'
   selectedHazardId?: string | null
-  onLocateHazard?: (hazardId: string, lat: number, lon: number, hazard: Hazard) => void
+  onLocateHazard?: (hazardId: string, lat: number, lon: number, hazard: Hazard, context?: AdvisoryMapContext) => void
   trafficIncidents?: TrafficIncident[]
   dismissedAlertIds?: Set<string>
   onDismissAlert?: (id: string) => void
@@ -95,12 +96,8 @@ export function ControllerAdvisories({ token, registerRefresh, registerLocateHaz
   const collectionKey = token
   const hazardKind = view === 'hazards' ? kind : ''
   const hazards = usePagedCollection<Hazard, PageResult<Hazard>>(`${collectionKey}:${hazardKind}`, async (page, signal) => {
-    const params = new URLSearchParams({ page: String(page), size: '100' })
-    if (hazardKind) params.set('kind', hazardKind)
     try {
-      const result = await apiRequest<HazardPageResponse>(`/api/v1/disruption/hazards?${params}`, token, signal)
-      if (!result) throw new Error('Hazard response was empty.')
-      return { ...result, totalItems: result.totalElements, totalPages: Math.ceil(result.totalElements / result.size) }
+      return await fetchHazardPage(page, token, signal, hazardKind)
     } catch (failure) {
       if (failure instanceof ApiError && failure.status === 401 && !signal.aborted) void signOut(failure.message)
       throw failure
@@ -327,6 +324,9 @@ export function ControllerAdvisories({ token, registerRefresh, registerLocateHaz
     } finally { if (!controller.signal.aborted) setPending(false) }
   }
   const pendingAdvisories = advisories.items
+  const currentReview = groupReview && pendingAdvisories.find(group => group.id === groupReview.id)
+  const reviewRecipientsChanged = groupReview !== null && (!currentReview || currentReview.members.length !== groupReview.members.length ||
+    groupReview.members.some(member => !currentReview.members.some(current => current.id === member.id)))
   const locatedHazard = hazardLocation?.hazard
   const listedHazards = locatedHazard && !hazardItems.some(hazard => hazard.disruptionId === locatedHazard.disruptionId)
     ? [locatedHazard, ...hazardItems] : hazardItems
@@ -529,10 +529,10 @@ export function ControllerAdvisories({ token, registerRefresh, registerLocateHaz
                           classification: group.hazardClassification,
                           facts: { title: group.hazardTitle, description: group.hazardDescription || group.hazardTitle, instruction: null, effectiveUntil: null },
                           kind: group.hazardKind || 'TRAFFIC_INCIDENT',
-                          updatedAt: new Date().toISOString(),
+                          updatedAt: '',
                           exposures: [],
                           limitations: []
-                        })}
+                        }, group)}
                       >
                         <MapPin className="size-3 text-amber-600" />
                         {isSelected ? 'Focused on map' : 'Locate hazard on map'}
@@ -556,12 +556,12 @@ export function ControllerAdvisories({ token, registerRefresh, registerLocateHaz
                 </div>
 
                 {/* Proposed Directive & Message */}
-                <div className="space-y-1.5">
+                {group.candidate && group.preview ? <div className="space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Proposed Directive ({instructionLabels[group.candidate.type]})</span>
                   </div>
                   <p className="text-sm font-medium bg-background border rounded-md p-2.5 leading-relaxed">{group.preview}</p>
-                </div>
+                </div> : <p className="text-sm text-muted-foreground">Review the proposed instruction for each bus.</p>}
 
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <Button disabled={pending} aria-label="Review and send to affected captains" onClick={() => { setActionError(''); setGroupReview(group) }}>
@@ -575,6 +575,7 @@ export function ControllerAdvisories({ token, registerRefresh, registerLocateHaz
                   </summary>
                   <div className="space-y-3 pt-1">{group.members.map(a => <div key={a.id} className="space-y-2 rounded-lg border p-3">
                     <p className="font-medium text-sm">{a.busId}</p>
+                    {!group.candidate && <p className="text-sm">{a.preview}</p>}
                     <p className="text-xs text-muted-foreground">{a.candidate.rationale}</p>
                     <div className="flex flex-wrap gap-2">
                       <Button variant="outline" size="sm" disabled={pending} onClick={() => void submit(`/api/v1/planning/advisories/${a.id}/decisions`, {})}>Send to this bus</Button>
@@ -615,17 +616,37 @@ export function ControllerAdvisories({ token, registerRefresh, registerLocateHaz
                 <span>Disruption ID: <code className="text-[10px] font-mono">{groupReview.disruptionId.slice(0, 8)}…</code></span>
               </div>
             </div>
-            <p className="text-xs text-muted-foreground font-medium">Simulation delivery · Directive: {instructionLabels[groupReview.candidate.type]}</p>
-            <p className="rounded-lg border bg-background p-3 text-sm font-medium leading-relaxed">{groupReview.preview}</p>
+            {groupReview.candidate && groupReview.preview && <>
+              <p className="text-xs text-muted-foreground font-medium">Simulation delivery · Directive: {instructionLabels[groupReview.candidate.type]}</p>
+              <p className="rounded-lg border bg-background p-3 text-sm font-medium leading-relaxed">{groupReview.preview}</p>
+            </>}
           </div>
-          <ScrollArea className="max-h-64 rounded-lg border" tabIndex={0} aria-label="Broadcast recipients"><ul className="divide-y">{groupReview.members.map(member => <li key={member.id} className="px-3 py-2 text-sm">{member.busId}</li>)}</ul></ScrollArea>
-          {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
+          <ScrollArea className="max-h-64 rounded-lg border" tabIndex={0} aria-label="Broadcast recipients">
+            <ul className="divide-y">{groupReview.members.map(member => {
+              const conflict = groupReview.movementConflicts?.find(value => value.proposalId === member.id)
+              return <li key={member.id} className="px-3 py-2 text-sm">
+                <p className="font-medium">{member.busId}</p>
+                {!groupReview.candidate && <p className="mt-1">{member.preview}</p>}
+                {conflict && <p className="mt-1 text-muted-foreground">Active instruction to replace · {conflict.message}</p>}
+              </li>
+            })}</ul>
+          </ScrollArea>
+          {!!groupReview.movementConflicts?.length && <p className="text-sm">
+            Sending replaces the active instructions listed above and sends the new advisory to every bus in this group.
+          </p>}
+          {(actionError || reviewRecipientsChanged) && <p role="alert" className="text-sm text-destructive">
+            {actionError || 'Recipients have changed. Close this review and check the current advisory.'}
+          </p>}
           <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={pending} onClick={() => setGroupReview(null)}>Cancel</Button>
-            <Button disabled={pending} onClick={() => {
-              if (pending) return
-              void submit('/api/v1/planning/advisory-groups/decisions', { proposalIds: groupReview.members.map(member => member.id) })
+            <Button disabled={pending || reviewRecipientsChanged} onClick={() => {
+              if (pending || reviewRecipientsChanged) return
+              const conflicts = groupReview.movementConflicts ?? []
+              void submit('/api/v1/planning/advisory-groups/decisions', {
+                proposalIds: groupReview.members.map(member => member.id),
+                ...(conflicts.length && { replacements: Object.fromEntries(conflicts.map(value => [value.proposalId, value.instructionId])) }),
+              })
                 .then(saved => { if (saved) setGroupReview(null) })
-            }}>{pending ? 'Sending…' : 'Approve and send group'}</Button></div>
+            }}>{pending ? 'Sending…' : groupReview.movementConflicts?.length ? 'Replace and send group' : 'Approve and send group'}</Button></div>
         </DialogContent>}
       </Dialog>
       {edit && <Card><CardContent><form className="space-y-4" onSubmit={event => {

@@ -1,15 +1,19 @@
 package com.csd.occ.ingestion.api;
 
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import com.csd.occ.ingestion.domain.DemoFleetService;
 import com.csd.occ.ingestion.domain.DemoFleetSnapshot;
 import com.csd.occ.ingestion.infrastructure.security.IngestionSecurityConfig;
 import com.csd.occ.ingestion.infrastructure.security.SupabaseRoleConverter;
+import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -47,5 +51,24 @@ class DemoFleetControllerTest {
         for (String role : List.of("CAPTAIN", "CONTROLLER", "ADMIN"))
             mvc.perform(get("/internal/v1/ingestion/demo-fleet").param("demoRunId", UUID.randomUUID().toString())
                     .with(user("user").roles(role))).andExpect(status().isForbidden());
+    }
+
+    @Test
+    void fleetSerializesCurrentRouteProgressSeparatelyFromReplayAndAllowsUnknownPosition() throws Exception {
+        UUID run = UUID.randomUUID();
+        var replay = new DemoFleetSnapshot.Progress("44251", 8, Instant.EPOCH, 30, List.of(5), List.of(300));
+        var moving = new DemoFleetSnapshot.Vehicle("demo-190-1", "demo-190-1", "DEMO-190-01", "190", 1,
+                Optional.empty(), "CAPTAIN_ASSIGNMENT_UNAVAILABLE", Optional.of(replay), 9, 0);
+        var unknown = new DemoFleetSnapshot.Vehicle("demo-190-2", "demo-190-2", "DEMO-190-02", "190", 1,
+                Optional.empty(), "CAPTAIN_ASSIGNMENT_UNAVAILABLE", Optional.of(replay), null, 0);
+        when(fleet.find(eq(run), anyInt(), anyInt())).thenReturn(
+                new DemoFleetSnapshot(run, "REPLAY_COMPLETE", List.of(moving, unknown), 2, 0, 20));
+
+        mvc.perform(get("/internal/v1/ingestion/demo-fleet").param("demoRunId", run.toString())
+                .header("X-OCC-Peer-Token", "planning-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].progress.stopSequence").value(8))
+                .andExpect(jsonPath("$.items[0].nextStopSequence").value(9))
+                .andExpect(jsonPath("$.items[1].nextStopSequence").value(nullValue()));
     }
 }

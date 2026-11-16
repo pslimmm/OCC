@@ -161,11 +161,18 @@ class InstructionServiceTest {
 
     @Test
     void pendingQueueFiltersBeforeApplyingTheRequestedPage() {
-        var request = org.springframework.data.domain.PageRequest.of(1, 20);
-        var expected = new PageImpl<>(List.of(proposal), request, 21);
+        var request = org.springframework.data.domain.Pageable.unpaged(org.springframework.data.domain.Sort.by("id"));
+        var staleHazard = new AdvisoryContextPort.Hazard(UUID.randomUUID(), hazard.kind(), hazard.status(), hazard.inactiveReason(),
+                hazard.classification(), runId, sourceObservationId, NOW, hazard.facts(), List.of(), hazard.limitations());
+        var stale = new AdvisoryProposal(UUID.randomUUID(), runId, staleHazard, bus,
+                new AdvisoryDraftPort.Result(caution, "synthetic", "{}", "{}"), proposal.preview(), NOW.minusSeconds(1));
+        var expected = new PageImpl<>(List.of(stale, proposal));
         when(proposals.findByDemoRunIdAndStatusOrderByCreatedAtAsc(runId, "PENDING", request)).thenReturn(expected);
+        when(context.hazard(staleHazard.disruptionId())).thenReturn(staleHazard);
 
-        assertThat(service.proposals(1, 20, true)).isSameAs(expected);
+        var page = service.proposals(0, 1, true);
+        assertThat(page.getContent()).containsExactly(proposal);
+        assertThat(page.getTotalElements()).isEqualTo(1);
 
         verify(proposals).findByDemoRunIdAndStatusOrderByCreatedAtAsc(runId, "PENDING", request);
         verify(proposals, never()).findByDemoRunIdOrderByCreatedAtAsc(any(), any());

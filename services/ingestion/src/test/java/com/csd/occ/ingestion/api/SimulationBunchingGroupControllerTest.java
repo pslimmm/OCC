@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.csd.occ.ingestion.domain.CurrentSimulationBunchingGroupService;
 import com.csd.occ.ingestion.domain.DemoAlertDetails;
 import com.csd.occ.ingestion.domain.DemoRunService;
 import com.csd.occ.ingestion.domain.DemoVehicleDetails;
@@ -15,6 +16,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -33,7 +35,7 @@ import org.springframework.test.web.servlet.MockMvc;
 class SimulationBunchingGroupControllerTest {
     @Autowired MockMvc mvc;
     @MockitoBean DemoRunService runs;
-    @MockitoBean com.csd.occ.ingestion.domain.CurrentSimulationBunchingGroupService current;
+    @MockitoBean CurrentSimulationBunchingGroupService current;
     @MockitoBean JwtDecoder decoder;
 
     @ParameterizedTest
@@ -49,5 +51,38 @@ class SimulationBunchingGroupControllerTest {
                 .andExpect(status().is(expected));
         if (expected == 200) result.andExpect(jsonPath("$.affectedBusReferences[0]").value("bus-1"))
                 .andExpect(jsonPath("$.followingBusReference").value("bus-2"));
+    }
+
+    @Test
+    void currentGroupKeepsTheDetectionStopAlongsideTheMotionForecast() throws Exception {
+        var runId = UUID.randomUUID();
+        var eventId = UUID.randomUUID();
+        var rawId = UUID.randomUUID();
+        var snapshotId = UUID.randomUUID();
+        var now = Instant.parse("2026-11-10T00:00:00Z");
+        var forecast = new CurrentSimulationBunchingGroupService.ControlPrediction(snapshotId, "44241", 9, now, List.of(
+                new CurrentSimulationBunchingGroupService.ControlArrival("bus-1", now.minusSeconds(10)),
+                new CurrentSimulationBunchingGroupService.ControlArrival("bus-2", now.plusSeconds(35))));
+        when(current.find(runId, eventId)).thenReturn(Optional.of(new CurrentSimulationBunchingGroupService.Group(
+                runId, eventId, "190", "44251", 1, rawId, now.minusSeconds(90), now.plusSeconds(60),
+                List.of("bus-1", "bus-2"), List.of(45L), List.of(true), forecast)));
+
+        mvc.perform(get("/internal/v1/ingestion/demo-runs/{run}/bunching-groups/{event}/current", runId, eventId)
+                        .header("X-OCC-Peer-Token", "planning-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stopCode").value("44251"))
+                .andExpect(jsonPath("$.rawObservationId").value(rawId.toString()))
+                .andExpect(jsonPath("$.controlPrediction.snapshotId").value(snapshotId.toString()))
+                .andExpect(jsonPath("$.controlPrediction.stopCode").value("44241"))
+                .andExpect(jsonPath("$.controlPrediction.stopSequence").value(9))
+                .andExpect(jsonPath("$.controlPrediction.arrivals[0].arrivalAt").value(now.minusSeconds(10).toString()))
+                .andExpect(jsonPath("$.controlPrediction.arrivals[1].busReference").value("bus-2"));
+
+        when(current.find(runId, eventId)).thenReturn(Optional.of(new CurrentSimulationBunchingGroupService.Group(
+                runId, eventId, "190", "44251", 1, rawId, now.minusSeconds(90), now.plusSeconds(60),
+                List.of("bus-1", "bus-2"), List.of(45L), List.of(true), null)));
+        mvc.perform(get("/internal/v1/ingestion/demo-runs/{run}/bunching-groups/{event}/current", runId, eventId)
+                        .header("X-OCC-Peer-Token", "planning-token"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.controlPrediction").doesNotHaveJsonPath());
     }
 }

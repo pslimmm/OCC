@@ -76,7 +76,10 @@ public class PlanningScopeService {
 
     private List<String> decodeLimitations(String value) {
         if (value == null || value.isBlank()) return List.of();
-        try { return codec.decodeStringList(value).stream().filter(java.util.Objects::nonNull).limit(20).toList(); }
+        try {
+            return DiagnosisSummaryPolicy.displayLimitations(
+                    codec.decodeStringList(value).stream().filter(java.util.Objects::nonNull).limit(20).toList());
+        }
         catch (RuntimeException ignored) {
             return List.of("Evidence and limitation details are unavailable for this retained diagnosis.");
         }
