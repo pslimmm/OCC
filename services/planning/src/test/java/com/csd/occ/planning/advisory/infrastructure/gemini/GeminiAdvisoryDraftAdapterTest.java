@@ -7,12 +7,21 @@ import static org.mockito.Mockito.*;
 
 import com.csd.occ.planning.advisory.domain.AdvisoryContextPort;
 import com.csd.occ.planning.advisory.domain.HazardEventFacts;
+import com.csd.occ.planning.advisory.domain.InstructionType;
 import com.csd.occ.planning.domain.audit.ApplicationAuditCapturePort;
 import com.csd.occ.planning.recommendation.infrastructure.config.RecommendationAiProperties;
 import com.csd.occ.planning.recommendation.infrastructure.config.RecommendationInputProperties;
+import com.google.genai.Client;
+import com.google.genai.types.HttpOptions;
+import com.google.genai.types.HttpRetryOptions;
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -25,6 +34,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.beans.factory.support.StaticListableBeanFactory;
 import tools.jackson.databind.json.JsonMapper;
@@ -34,6 +44,59 @@ class GeminiAdvisoryDraftAdapterTest {
     private static final String VALID = """
             {"title":"Flood update","message":"Water reported. Use caution.","services":["190"],"locations":["Example Stop"]}
             """;
+
+    @Test
+    void syntheticFloodDraftPassesThroughTheGeminiClientWithOptionalParameters() throws Exception {
+        var json = JsonMapper.builder().build();
+        String candidate = """
+                {"type":"BE_CAUTIOUS","parameters":{"stopCode":"44251","stopName":"Example Stop","stopSequence":10},
+                 "rationale":"The flood report asks buses to use caution."}
+                """;
+        byte[] response = json.writeValueAsBytes(Map.of("modelVersion", "synthetic-model", "candidates", List.of(
+                Map.of("content", Map.of("role", "model", "parts", List.of(Map.of("text", candidate))), "finishReason", "STOP"))));
+        var request = new AtomicReference<String>();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            server.createContext("/", exchange -> {
+                try (exchange) {
+                    request.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+                    exchange.getResponseHeaders().set("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(200, response.length);
+                    exchange.getResponseBody().write(response);
+                }
+            });
+            server.start();
+            try (var client = Client.builder().apiKey("synthetic-key").httpOptions(HttpOptions.builder()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort()).timeout(3000)
+                    .retryOptions(HttpRetryOptions.builder().attempts(1).build()).build()).build()) {
+                var model = GoogleGenAiChatModel.builder().genAiClient(client)
+                        .options(GoogleGenAiChatOptions.builder().model("synthetic-model").build()).build();
+                var clients = new StaticListableBeanFactory();
+                clients.addBean("model", ChatClient.create(model));
+                var adapter = new GeminiAdvisoryDraftAdapter(clients.getBeanProvider(ChatClient.class),
+                        new RecommendationAiProperties(true), new RecommendationInputProperties(8192), json, audit);
+                var source = hazard(true, "Water reported.");
+                var flood = new AdvisoryContextPort.Hazard(source.disruptionId(), source.kind(), "ACTIVE", null,
+                        "SIMULATION", UUID.randomUUID(), source.sourceObservationId(), Instant.EPOCH, source.facts(),
+                        source.exposures(), List.of());
+                var bus = new AdvisoryContextPort.Bus("private-bus-id", "trip", "registration", "190", 1, null,
+                        "UNASSIGNED", new AdvisoryContextPort.Progress("44249", 9, Instant.EPOCH, 30, List.of(5), List.of(60)));
+
+                var result = adapter.propose(flood, bus);
+
+                var config = json.readTree(request.get()).path("generationConfig");
+                var parameters = config.path("responseJsonSchema").path("properties").path("parameters");
+                assertThat(config.path("responseMimeType").asString()).isEqualTo("application/json");
+                assertThat(parameters.path("properties").path("durationSeconds").path("type").asString())
+                        .isEqualToIgnoringCase("integer");
+                assertThat(result.candidate().type()).isEqualTo(InstructionType.BE_CAUTIOUS);
+                assertThat(result.candidate().parameters().stopCode()).isEqualTo("44251");
+                assertThat(result.candidate().parameters().durationSeconds()).isNull();
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
 
     @Test
     void disabledAiUsesSourceFactsAndDistinctAffectedServicesAndStopsWithoutCallingTheModel() {

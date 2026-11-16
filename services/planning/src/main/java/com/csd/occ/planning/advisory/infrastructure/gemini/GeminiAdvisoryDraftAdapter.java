@@ -16,6 +16,29 @@ import tools.jackson.databind.json.JsonMapper;
 /** Reuses the configured recommendation Gemini client. Only an allowlisted synthetic input can leave this adapter. */
 @Component
 public class GeminiAdvisoryDraftAdapter implements AdvisoryDraftPort {
+    // Spring AI converts response schemas through Gemini's Schema type, which requires scalar types.
+    private static final String ADVISORY_RESPONSE_SCHEMA = """
+            {
+              "type": "object",
+              "required": ["type", "parameters", "rationale"],
+              "properties": {
+                "type": {"type": "string", "enum": ["BE_CAUTIOUS", "REDUCE_SPEED", "SLOW_DOWN_NEAR_STOPS"]},
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "stopCode": {"type": "string"},
+                    "stopName": {"type": "string"},
+                    "stopSequence": {"type": "integer"},
+                    "subsequentStopCount": {"type": "integer"},
+                    "speedReductionKmh": {"type": "integer"},
+                    "durationSeconds": {"type": "integer"}
+                  }
+                },
+                "rationale": {"type": "string"}
+              }
+            }
+            """;
+
     private final ObjectProvider<ChatClient> model;
     private final RecommendationAiProperties settings;
     private final RecommendationInputProperties inputs;
@@ -63,33 +86,34 @@ public class GeminiAdvisoryDraftAdapter implements AdvisoryDraftPort {
                     Use only BE_CAUTIOUS, REDUCE_SPEED or SLOW_DOWN_NEAR_STOPS, supplied stops and their sequences.
                     Numeric speed advice must use the supplied permitted reductions and durations exactly.
                     When hasSourceRestriction is true, choose BE_CAUTIOUS; the server preserves restriction wording.
+                    Omit parameters that do not apply to the chosen instruction.
                     Never claim verified road safety, closure, capacity or operational impact. Return typed parameters and a short rationale.
                     """)
                 .user(input)
                 .options(org.springframework.ai.google.genai.GoogleGenAiChatOptions.builder()
                         .responseMimeType("application/json")
-                        .responseSchema(new org.springframework.ai.converter.BeanOutputConverter<>(AdvisoryCandidate.class).getJsonSchema()))
+                        .responseSchema(ADVISORY_RESPONSE_SCHEMA))
                 .call().chatResponse(); }
         catch (RuntimeException failure) {
             audit.recordAi("AI_ADVISORY_DRAFT_FAILURE", "FAILURE", hazard.disruptionId(), hazard.demoRunId(), bus.busId(),
                     "ADVISORY_DRAFT", null, failure.getClass().getSimpleName(), input, null,
-                    aiMetrics(null, startedNanos, "advisory-prompt-v1", "advisory-schema-v1"));
+                    aiMetrics(null, startedNanos, "advisory-prompt-v2", "advisory-schema-v2"));
             throw failure;
         }
         if (response == null || response.getResult() == null) {
             audit.recordAi("AI_ADVISORY_DRAFT_FAILURE", "FAILURE", hazard.disruptionId(), hazard.demoRunId(), bus.busId(),
                     "ADVISORY_DRAFT", null, "EMPTY_RESPONSE", input, null,
-                    aiMetrics(null, startedNanos, "advisory-prompt-v1", "advisory-schema-v1"));
+                    aiMetrics(null, startedNanos, "advisory-prompt-v2", "advisory-schema-v2"));
             throw new IllegalStateException("Empty advisory model response");
         }
         String output = response.getResult().getOutput().getText();
         String modelName = response.getMetadata() == null ? null : response.getMetadata().getModel();
         audit.recordAi("AI_ADVISORY_DRAFT_OUTPUT", "RESPONSE_RECEIVED", hazard.disruptionId(), hazard.demoRunId(), bus.busId(),
-                "ADVISORY_DRAFT", modelName, null, input, output, aiMetrics(response, startedNanos, "advisory-prompt-v1", "advisory-schema-v1"));
+                "ADVISORY_DRAFT", modelName, null, input, output, aiMetrics(response, startedNanos, "advisory-prompt-v2", "advisory-schema-v2"));
         try {
             var candidate = json.readValue(output, AdvisoryCandidate.class);
             audit.recordAi("AI_ADVISORY_DRAFT_VALIDATION", "VALID", hazard.disruptionId(), hazard.demoRunId(), bus.busId(),
-                    "ADVISORY_DRAFT", modelName, null, null, null, aiMetrics(response, startedNanos, "advisory-prompt-v1", "advisory-schema-v1"));
+                    "ADVISORY_DRAFT", modelName, null, null, null, aiMetrics(response, startedNanos, "advisory-prompt-v2", "advisory-schema-v2"));
             return new Result(candidate, modelName, input, output);
         } catch (RuntimeException failure) {
             audit.recordAi("AI_ADVISORY_DRAFT_VALIDATION", "INVALID", hazard.disruptionId(), hazard.demoRunId(), bus.busId(),
