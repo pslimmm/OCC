@@ -448,7 +448,7 @@ class AdvisoryPersistenceIT {
         var instruction = instructions.decide(proposal.id(), null, null, CONTROLLER, null);
         var reloaded = issued.findById(instruction.id()).orElseThrow();
         assertThat(reloaded.parameters()).isEqualTo(proposal.candidate().parameters());
-        assertThat(reloaded.message()).isEqualTo("Reduce speed by 5 km/h for 5 min.");
+        assertThat(reloaded.message()).isEqualTo("Traffic incident reported along your route. Reduce speed by 5 km/h for 5 min.");
         assertThat(reloaded.captainUserId()).isEqualTo(captain);
         assertThat(proposals.findById(proposal.id()).orElseThrow().finalCandidate()).isEqualTo(proposal.candidate());
         var notice = draft(hazard, UUID.randomUUID(), MESSAGE);
@@ -1507,7 +1507,7 @@ class AdvisoryPersistenceIT {
                 ? new InstructionParameters(null, null, null, null, 5, 300)
                 : new InstructionParameters("44251", "School", 10, 0, null, null);
         var candidate = new AdvisoryCandidate(type, parameters, "Synthetic scenario evidence");
-        String preview = new InstructionPolicy().message(candidate, target, hazard.exposures(), null, context.limits());
+        String preview = new InstructionPolicy().message(candidate, target, hazard, context.limits());
         var proposal = proposals.saveAndFlush(new AdvisoryProposal(UUID.randomUUID(), run, hazard, target,
                 new AdvisoryDraftPort.Result(candidate, "synthetic-model", "captured input", "captured output"), preview, NOW));
         modelEvidence.saveAndFlush(new AdvisoryModelEvidence(proposal));

@@ -55,7 +55,7 @@ public class InstructionService {
         if (!"ACTIVE".equals(hazard.status()) || !proposal.context().hasSameEvidenceAs(hazard))
             throw new AdvisoryConflictException("Hazard evidence changed; review a current proposal");
         return policy.message(override == null ? proposal.candidate() : override,
-                assignedBus(proposal.demoRunId(), proposal.busId()), hazard.exposures(), hazard.facts().instruction(), context.limits());
+                assignedBus(proposal.demoRunId(), proposal.busId()), hazard, context.limits());
     }
     @Transactional
     public IssuedInstruction decide(UUID id, AdvisoryCandidate override, String rationale, PlanningActor actor, UUID replaceInstructionId) {
@@ -80,7 +80,7 @@ public class InstructionService {
         var hazard = context.hazard(proposal.disruptionId());
         if (!hazard.status().equals("ACTIVE") || !proposal.context().hasSameEvidenceAs(hazard))
             throw new AdvisoryConflictException("Hazard evidence changed or is no longer active; review a current proposal");
-        String message = policy.message(chosen, bus, hazard.exposures(), hazard.facts().instruction(), context.limits());
+        String message = policy.message(chosen, bus, hazard, context.limits());
         if (replaceInstructionId != null) {
             var predecessorKey = instructions.findKeyById(replaceInstructionId).orElseThrow(AdvisoryNotFoundException::new);
             if (!runId.equals(predecessorKey.getDemoRunId()) || !bus.busId().equals(predecessorKey.getBusId()))

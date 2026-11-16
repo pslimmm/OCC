@@ -64,7 +64,7 @@ public class HazardAdvisoryProcessor {
                 if (targetBusId != null && !targetBusId.equals(bus.busId())) continue;
                 if (bus.progress() == null || hazard.exposures().stream().noneMatch(e -> e.busId().equals(bus.busId()))) continue;
                 var draft = drafts.propose(hazard, bus);
-                String preview = policy.message(draft.candidate(), bus, hazard.exposures(), hazard.facts().instruction(), context.limits());
+                String preview = policy.message(draft.candidate(), bus, hazard, context.limits());
                 result.add(new AdvisoryProposal(submission.eventId(), scope.demoRunId(), hazard, bus, draft, preview, clock.instant()));
             }
             proposals.record(requestId, result);

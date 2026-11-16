@@ -181,12 +181,15 @@ class InstructionServiceTest {
 
     @Test
     void repeatedIdenticalDecisionReturnsTheOriginalInstructionWithoutIssuingAgain() {
+        String expected = "Traffic incident reported near Example Stop. Be cautious.";
+        assertThat(proposal.preview()).isEqualTo(expected);
+        assertThat(service.preview(proposal.id(), null)).isEqualTo(expected);
         var first = service.decide(proposal.id(), null, null, CONTROLLER, null);
         when(instructions.findById(proposal.id())).thenReturn(Optional.of(first));
         var replay = service.decide(proposal.id(), null, null, CONTROLLER, null);
         assertThat(replay).isSameAs(first);
         assertThat(replay.issuedAt()).isEqualTo(NOW);
-        assertThat(replay.message()).isEqualTo(proposal.preview());
+        assertThat(replay.message()).isEqualTo(expected);
         verify(instructions, times(1)).saveAndFlush(any());
     }
 

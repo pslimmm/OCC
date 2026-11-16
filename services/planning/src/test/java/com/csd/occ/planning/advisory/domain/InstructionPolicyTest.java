@@ -24,17 +24,28 @@ class InstructionPolicyTest {
     @Test
     void rendersConciseExactCautionAndNumericSpeedTemplates() {
         assertThat(message(InstructionType.BE_CAUTIOUS, stop(0), null))
-                .isEqualTo("Disruption near Teck Whye School. Be cautious.");
+                .isEqualTo("Flood alert near Teck Whye School. Be cautious.");
         assertThat(message(InstructionType.REDUCE_SPEED, speed(5, 300), null))
-                .isEqualTo("Reduce speed by 5 km/h for 5 min.");
+                .isEqualTo("Flood alert along your route. Reduce speed by 5 km/h for 5 min.");
     }
 
     @Test
     void rendersStopRangesIncludingZeroSubsequentStops() {
         assertThat(message(InstructionType.SLOW_DOWN_NEAR_STOPS, stop(2), null))
-                .isEqualTo("Slow down near Teck Whye School and the next 2 stops.");
+                .isEqualTo("Flood alert near Teck Whye School. Slow down as you approach and for the next 2 stops.");
         assertThat(message(InstructionType.SLOW_DOWN_NEAR_STOPS, stop(0), null))
-                .isEqualTo("Slow down near Teck Whye School.");
+                .isEqualTo("Flood alert near Teck Whye School. Slow down as you approach.");
+    }
+
+    @Test
+    void namesTheReportedHazardInTheCaptainMessage() {
+        var caution = candidate(InstructionType.BE_CAUTIOUS, stop(0));
+        assertThat(policy.message(caution, bus, hazard("TRAFFIC_INCIDENT", "Vehicle Breakdown", null, exposure), limits))
+                .isEqualTo("Vehicle breakdown reported near Teck Whye School. Be cautious.");
+        assertThat(policy.message(caution, bus, hazard("RAIL_DISRUPTION", null, null, exposure), limits))
+                .startsWith("Rail disruption reported near Teck Whye School.");
+        assertThat(policy.message(caution, bus, hazard("ROADWORKS", null, null, exposure), limits))
+                .startsWith("Roadworks reported near Teck Whye School.");
     }
 
     @Test
@@ -69,13 +80,13 @@ class InstructionPolicyTest {
         var otherBusExposure = List.of(new AdvisoryContextPort.Exposure("other-bus", "190", 1,
                 "44251", "Teck Whye School", 10, "PROXIMITY", "Unverified road impact"));
         assertThatThrownBy(() -> policy.message(candidate(InstructionType.BE_CAUTIOUS, stop(0)), bus,
-                otherBusExposure, null, limits)).isInstanceOf(IllegalArgumentException.class);
+                hazard("FLOOD", null, null, otherBusExposure), limits)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void preservesSourceRestrictionsAndRejectsTheirReplacementWithMovementAdvice() {
         assertThat(message(InstructionType.BE_CAUTIOUS, stop(0), " Avoid the affected area. "))
-                .isEqualTo("Disruption near Teck Whye School. Avoid the affected area.");
+                .isEqualTo("Flood alert near Teck Whye School. Avoid the affected area.");
         assertThatThrownBy(() -> message(InstructionType.REDUCE_SPEED, speed(5, 300), "Avoid the affected area."))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> message(InstructionType.SLOW_DOWN_NEAR_STOPS, stop(1), "Avoid the affected area."))
@@ -87,13 +98,19 @@ class InstructionPolicyTest {
         var unavailable = new AdvisoryContextPort.Bus(bus.busId(), bus.tripId(), bus.registrationNumber(),
                 bus.serviceId(), bus.directionId(), bus.captainUserId(), "ASSIGNED", null);
         assertThatThrownBy(() -> policy.message(candidate(InstructionType.BE_CAUTIOUS, stop(0)), unavailable,
-                exposure, null, limits)).isInstanceOf(IllegalArgumentException.class);
+                hazard("FLOOD", null, null, exposure), limits)).isInstanceOf(IllegalArgumentException.class);
         for (var type : List.of(InstructionType.HOLD, InstructionType.DWELL_ADJUSTMENT))
             assertThatThrownBy(() -> message(type, stop(0), null)).isInstanceOf(IllegalArgumentException.class);
     }
 
     private String message(InstructionType type, InstructionParameters parameters, String restriction) {
-        return policy.message(candidate(type, parameters), bus, exposure, restriction, limits);
+        return policy.message(candidate(type, parameters), bus, hazard("FLOOD", null, restriction, exposure), limits);
+    }
+    private AdvisoryContextPort.Hazard hazard(String kind, String title, String restriction, List<AdvisoryContextPort.Exposure> stops) {
+        var facts = new HazardEventFacts.Fact(kind, "report", "OBSERVED", Instant.EPOCH, null, null,
+                title, null, null, restriction, List.of(), null, null, null, null, List.of());
+        return new AdvisoryContextPort.Hazard(UUID.randomUUID(), kind, "ACTIVE", null, "SIMULATION",
+                UUID.randomUUID(), UUID.randomUUID(), Instant.EPOCH, facts, stops, List.of());
     }
     private AdvisoryCandidate candidate(InstructionType type, InstructionParameters parameters) {
         return new AdvisoryCandidate(type, parameters, "Controller-reviewed synthetic scenario");
