@@ -567,6 +567,7 @@ export interface BunchingMapProps {
   hazards?: MapHazard[]
   selectedHazardId?: string | null
   onSelectHazard?: (hazardId: string | null) => void
+  onLocateHazardInList?: (hazardId: string) => void
   focusCoord?: { lat: number; lng: number } | null
 }
 
@@ -586,6 +587,7 @@ export function BunchingMap({
   hazards = [],
   selectedHazardId,
   onSelectHazard,
+  onLocateHazardInList,
   focusCoord,
 }: BunchingMapProps) {
   const incidentBusKeys = useMemo(() => {
@@ -803,7 +805,9 @@ export function BunchingMap({
     return computeCorridorFit(selectedFocusPoints, width, height, 60)
   }, [selectedFocusPoints, width, height])
 
-  const [manualView, setManualView] = useState<{ center: { lat: number; lng: number }; zoom: number } | null>(null)
+  const [manualView, setManualView] = useState<{ center: { lat: number; lng: number }; zoom: number } | null>(
+    () => focusCoord && validCoord(focusCoord.lat, focusCoord.lng) ? { center: focusCoord, zoom: 15 } : null
+  )
   const [prevFitKey, setPrevFitKey] = useState(fitKey)
   const [prevSelectedId, setPrevSelectedId] = useState<string | null | undefined>(selectedIncident?.id)
   const [prevFocusCoord, setPrevFocusCoord] = useState(focusCoord)
@@ -1122,7 +1126,7 @@ export function BunchingMap({
     : new Map<string, MapOverlayRect>()
 
   return (
-    <div id="corridor-map" className="relative overflow-hidden rounded-lg border bg-muted/10">
+    <div id="corridor-map" className="relative scroll-mt-20 overflow-hidden rounded-lg border bg-muted/10">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
         <div className="space-y-0.5">
           <div className="flex flex-wrap items-center gap-2">
@@ -1760,21 +1764,15 @@ export function BunchingMap({
               >
                 Center on map
               </Button>
-              <Button
+              {onLocateHazardInList && <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 className="h-7 text-xs text-primary hover:underline"
-                onClick={() => {
-                  const targetId = activeSelectedHazard.disruptionId || activeSelectedHazard.id
-                  const el = document.getElementById(`hazard-${targetId}`)
-                  if (el) {
-                    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                  }
-                }}
+                onClick={() => onLocateHazardInList(activeSelectedHazard.disruptionId || activeSelectedHazard.id)}
               >
                 Locate in list ↓
-              </Button>
+              </Button>}
             </div>
           </div>
           )
@@ -1939,6 +1937,7 @@ export function ControllerDisruptions({
   trafficIncidents = [],
   selectedHazardId,
   onSelectHazard,
+  onLocateHazardInList,
   focusCoord,
   extraHazards = [],
   dismissedAlertIds,
@@ -1955,6 +1954,7 @@ export function ControllerDisruptions({
   trafficIncidents?: TrafficIncident[]
   selectedHazardId?: string | null
   onSelectHazard?: (hazardId: string | null) => void
+  onLocateHazardInList?: (hazardId: string) => void
   focusCoord?: { lat: number; lng: number } | null
   extraHazards?: MapHazard[]
   dismissedAlertIds?: Set<string>
@@ -1968,7 +1968,9 @@ export function ControllerDisruptions({
   const directionParam = searchParams.get('direction')
   const statusParam = searchParams.get('status')
   const statusFilter: 'active' | 'all' = statusParam === 'all' ? 'all' : 'active'
-  const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped')
+  const [flatView, setFlatView] = useState<{ focusCoord: typeof focusCoord } | null>(null)
+  const viewMode = flatView && flatView.focusCoord === focusCoord ? 'flat' : 'grouped'
+  const scrolledFocus = useRef<typeof focusCoord>(null)
   const [expandedIncidents, setExpandedIncidents] = useState<Set<string>>(new Set())
 
   useEffect(() => {
@@ -2418,6 +2420,13 @@ export function ControllerDisruptions({
     return baseList
   }, [trafficIncidents, selectedCorridorKey, corridorRoutes, run, extraHazards])
 
+  const showCorridorMap = viewMode === 'grouped' && (corridorRoutes.length > 0 || corridorHazards.length > 0)
+  useEffect(() => {
+    if (!showCorridorMap || !focusCoord || scrolledFocus.current === focusCoord) return
+    document.getElementById('corridor-map')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    scrolledFocus.current = focusCoord
+  }, [focusCoord, showCorridorMap])
+
   return <div className="space-y-10">
     <section aria-labelledby="bunching-title" className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2462,7 +2471,7 @@ export function ControllerDisruptions({
           <Button
             variant={viewMode === 'grouped' ? 'secondary' : 'ghost'}
             size="sm"
-            onClick={() => setViewMode('grouped')}
+            onClick={() => setFlatView(null)}
             aria-pressed={viewMode === 'grouped'}
           >
             Grouped
@@ -2470,7 +2479,7 @@ export function ControllerDisruptions({
           <Button
             variant={viewMode === 'flat' ? 'secondary' : 'ghost'}
             size="sm"
-            onClick={() => setViewMode('flat')}
+            onClick={() => setFlatView({ focusCoord })}
             aria-pressed={viewMode === 'flat'}
           >
             Flat
@@ -2546,7 +2555,7 @@ export function ControllerDisruptions({
         </div>
       )}
 
-      {viewMode === 'grouped' && !!corridorRoutes.length && (
+      {showCorridorMap && (
         <BunchingMap
           routes={corridorRoutes}
           affectedStopCodes={affectedStopCodes}
@@ -2558,6 +2567,7 @@ export function ControllerDisruptions({
           hazards={corridorHazards}
           selectedHazardId={selectedHazardId}
           onSelectHazard={onSelectHazard}
+          onLocateHazardInList={onLocateHazardInList}
           focusCoord={focusCoord}
         />
       )}

@@ -177,6 +177,8 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
   const [advisoryRefreshTime, setAdvisoryRefreshTime] = useState({ key: '', at: null as string | null })
   const refreshAdvisories = useRef<(signal: AbortSignal) => Promise<void>>(() => Promise.resolve())
   const registerAdvisoryRefresh = useCallback((callback: (signal: AbortSignal) => Promise<void>) => { refreshAdvisories.current = callback }, [])
+  const locateHazardInList = useRef<(id: string) => void>(() => {})
+  const registerLocateHazardInList = useCallback((callback: (id: string) => void) => { locateHazardInList.current = callback }, [])
   const [arrivalStopName, setArrivalStopName] = useState('')
   const [arrivalSortBy, setArrivalSortBy] = useState<'arrival' | 'stopName'>('arrival')
   const [arrivalSortDirection, setArrivalSortDirection] = useState<'asc' | 'desc'>('asc')
@@ -201,8 +203,6 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     setLocatedHazard(mapHazard)
     if (!pathname.endsWith('/disruptions')) {
       navigate(`/controller/disruptions?incident=${hazardId}`)
-    } else {
-      document.getElementById('corridor-map')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     }
   }
   const [routeArrivals, setRouteArrivals] = useState<Resource<Arrival[]>>(empty)
@@ -582,6 +582,16 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
     setAlertListModal(prev => (prev === 'traffic' ? null : prev))
     setDirectiveAlertOpen(prev => (displayedAlert?.kind === 'traffic' ? false : prev))
   }, [awaitingTrafficIncidents, displayedAlert])
+
+  const handleAcknowledgeListedHazards = (ids: string[]) => {
+    setDismissedAlertIds(previous => {
+      const next = new Set([...previous, ...ids])
+      saveDismissedAlertIds(next)
+      return next
+    })
+    setActiveNewIncidentAlert(current => current && ids.includes(current.id) ? null : current)
+    if (displayedAlert && ids.includes(displayedAlert.id)) setDirectiveAlertOpen(false)
+  }
 
   const requestLiveData = useCallback(async (signal: AbortSignal) => {
     const generation = ++liveRequestGenerationRef.current
@@ -1251,6 +1261,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
           trafficIncidents={currentTraffic}
           selectedHazardId={selectedHazardId}
           onSelectHazard={setSelectedHazardId}
+          onLocateHazardInList={id => locateHazardInList.current(id)}
           focusCoord={focusHazardCoord}
           extraHazards={locatedHazard ? [locatedHazard] : []}
           dismissedAlertIds={dismissedAlertIds}
@@ -1274,7 +1285,7 @@ export function ControllerPage({ email, token, controllerRefreshIntervalSeconds,
           trafficIncidents={currentTraffic}
           dismissedAlertIds={dismissedAlertIds}
           onDismissAlert={handleDismissAlert}
-          onAcknowledgeAllIncidents={handleAcknowledgeAllIncidents} />}
+          onAcknowledgeAllIncidents={handleAcknowledgeListedHazards} registerLocateHazardInList={registerLocateHazardInList} />}
       </div>
     </div>
   </div>

@@ -3147,3 +3147,82 @@ for (const role of ['CONTROLLER', 'CAPTAIN']) {
     await expect(page.getByRole('heading', { name: 'Access denied' })).toBeVisible()
   })
 }
+
+async function mockDisruptionControls(context: BrowserContext) {
+  await mockAuth(context, 'CONTROLLER')
+  await context.route('https://www.onemap.gov.sg/maps/tiles/**', route => route.abort())
+  const hazards = [
+    { disruptionId: 'roadwork-hazard', kind: 'ROADWORKS', title: 'Roadworks near another corridor', latitude: 1.315, longitude: 103.78 },
+    { disruptionId: 'accident-hazard', kind: 'TRAFFIC_INCIDENT', title: 'Accident near Stop A01', latitude: 1.39, longitude: 103.75 },
+  ].map(({ disruptionId, kind, title, latitude, longitude }) => ({
+    disruptionId, kind, status: 'ACTIVE', classification: 'OBSERVATION_ONLY', demoRunId: null, updatedAt: '2026-10-25T04:00:00Z',
+    facts: { title, description: title, locations: [{ latitude, longitude }] }, exposures: [], limitations: [],
+  }))
+  await context.route('**/api/v1/disruption/hazards?*', route => {
+    const params = new URL(route.request().url()).searchParams
+    const kind = params.get('kind')
+    const page = Number(params.get('page'))
+    const matching = hazards.filter(hazard => !kind || hazard.kind === kind)
+    return route.fulfill({ json: { items: matching.slice(page, page + 1), page, size: 1, totalElements: matching.length, feeds: [] } })
+  })
+  await context.route('**/api/v1/disruption/hazards/accident-hazard', route => route.fulfill({ json: hazards[1] }))
+  await context.route('**/api/v1/disruption/traffic-incidents?*', route => route.fulfill({ json: {
+    items: [
+      { id: 'roadwork-alert', disruptionId: 'roadwork-hazard', incidentType: 'Roadwork', message: hazards[0].facts.title, ...hazards[0].facts.locations[0] },
+      { id: 'accident-alert', disruptionId: 'accident-hazard', incidentType: 'Accident', message: hazards[1].facts.title, ...hazards[1].facts.locations[0] },
+    ], page: 0, totalItems: 2, totalPages: 1,
+  } }))
+}
+
+test('Disruptions restores the map from Flat and locates a hazard missing from the filtered list', async ({ page, context }) => {
+  await mockDisruptionControls(context)
+  await login(page, '/controller/disruptions')
+  const conditions = page.getByRole('region', { name: 'Hazard conditions', exact: true })
+  const map = page.getByLabel('Interactive affected corridor map.', { exact: false })
+  const flat = page.getByRole('button', { name: 'Flat', exact: true })
+  await flat.click()
+  await expect(map).toHaveCount(0)
+  await conditions.getByRole('button', { name: 'Locate on map', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Grouped', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(map).toBeInViewport()
+  const details = page.getByRole('region', { name: 'Hazard details' })
+  await expect(details).toContainText('Roadworks near another corridor')
+  await flat.click()
+  await conditions.getByRole('button', { name: /^(Locate|Focused) on map$/ }).click()
+  await expect(map).toBeInViewport()
+
+  const filter = page.getByLabel('Hazard type', { exact: true })
+  await filter.selectOption('ROADWORKS')
+  await expect(conditions.getByRole('heading')).toHaveText(['Roadworks near another corridor'])
+  await page.getByRole('button', { name: 'Reset map view' }).click()
+  await page.getByRole('button', { name: /Hazard: Accident - Accident near Stop A01/ }).press('Enter')
+  await details.getByRole('button', { name: /Locate in list/ }).click()
+  await expect(filter).toHaveValue('')
+  await expect(conditions.getByRole('heading', { name: 'Accident near Stop A01' })).toBeInViewport()
+
+  await context.route('**/api/v1/disruption/hazards/accident-hazard', route => route.fulfill({ status: 404 }))
+  await filter.selectOption('ROADWORKS')
+  await expect(conditions.getByRole('heading')).toHaveText(['Roadworks near another corridor'])
+  await details.getByRole('button', { name: /Locate in list/ }).click()
+  await expect(page.getByRole('alert').filter({ hasText: 'This map hazard is unavailable in the list.' })).toBeInViewport()
+})
+
+test('Disruptions bulk acknowledgement updates the listed hazards and respects the list filter', async ({ page, context }) => {
+  await mockDisruptionControls(context)
+  await login(page, '/controller/disruptions')
+  const filter = page.getByLabel('Hazard type', { exact: true })
+  await filter.selectOption('ROADWORKS')
+  const section = page.getByRole('region', { name: 'Multi-hazard advisories', exact: true })
+  const bulk = section.getByRole('button', { name: 'Acknowledge all incidents', exact: true })
+  const headerAlert = page.getByRole('button', { name: '1 incident alert', exact: true })
+  await expect(headerAlert).toBeVisible()
+  await bulk.click()
+  await expect(section.getByText('Acknowledged', { exact: true })).toBeVisible()
+  await expect(bulk).toHaveCount(0)
+  await expect(headerAlert).toBeVisible()
+
+  await filter.selectOption('TRAFFIC_INCIDENT')
+  await bulk.click()
+  await expect(section.getByText('Acknowledged', { exact: true })).toBeVisible()
+  await expect(headerAlert).toHaveCount(0)
+})

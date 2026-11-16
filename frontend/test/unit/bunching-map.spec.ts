@@ -603,6 +603,7 @@ test('BunchingMap renders pulsing selection ring and floating hazard detail card
       buses: [],
       hazards,
       selectedHazardId: 'haz-101',
+      onLocateHazardInList: () => {},
     })
   )
 

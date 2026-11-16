@@ -61,8 +61,9 @@ function getHazardBadgeInfo(kind?: string, title?: string) {
 
 const instructionLabels = { BE_CAUTIOUS: 'Be cautious', REDUCE_SPEED: 'Reduce speed', SLOW_DOWN_NEAR_STOPS: 'Slow down near stops', HOLD: 'Hold', DWELL_ADJUSTMENT: 'Adjust dwell', SKIP_STOP: 'Skip stop' }
 
-export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPendingChange, onRefreshTimeChange, view, selectedHazardId, onLocateHazard, trafficIncidents, dismissedAlertIds, onDismissAlert, onAcknowledgeAllIncidents }: {
+export function ControllerAdvisories({ token, registerRefresh, registerLocateHazardInList, onRefresh, onPendingChange, onRefreshTimeChange, view, selectedHazardId, onLocateHazard, trafficIncidents, dismissedAlertIds, onDismissAlert, onAcknowledgeAllIncidents }: {
   token: string; registerRefresh: (callback: (signal: AbortSignal) => Promise<void>) => void
+  registerLocateHazardInList?: (callback: (hazardId: string) => void) => void
   onRefresh: () => void; onPendingChange: (pending: boolean) => void
   onRefreshTimeChange: (at: string | null) => void
   view: 'hazards' | 'planning' | 'notices' | 'audit'
@@ -71,7 +72,7 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
   trafficIncidents?: TrafficIncident[]
   dismissedAlertIds?: Set<string>
   onDismissAlert?: (id: string) => void
-  onAcknowledgeAllIncidents?: () => void
+  onAcknowledgeAllIncidents?: (ids: string[]) => void
 }) {
   const [actionError, setActionError] = useState('')
   const [pending, setPending] = useState(false)
@@ -85,6 +86,9 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
   const [noticeSaving, setNoticeSaving] = useState(false)
   const [noticeNow, setNoticeNow] = useState(Date.now)
   const [kind, setKind] = useState('')
+  const [hazardLocation, setHazardLocation] = useState<{ hazard: Hazard | null; error?: string } | null>(null)
+  const locateRequest = useRef<AbortController | null>(null)
+  const sectionRef = useRef<HTMLElement>(null)
   const action = useRef<AbortController | null>(null)
   const hazardsEnabled = view === 'hazards' || edit !== null || draft !== null
 
@@ -148,6 +152,44 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
   }, request => request.requestId, view === 'audit')
   const { items: hazardItems, hasMore: hazardHasMore, isLoading: hazardsLoading, isLoadingMore: hazardsLoadingMore,
     error: hazardError, loadNext: loadNextHazard } = hazards
+
+  useEffect(() => {
+    if (view !== 'hazards' || !registerLocateHazardInList) return
+    registerLocateHazardInList(async id => {
+      locateRequest.current?.abort()
+      const listed = hazardItems.find(hazard => hazard.disruptionId === id)
+      if (listed) {
+        setHazardLocation({ hazard: listed })
+        return
+      }
+
+      sectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      const controller = new AbortController()
+      locateRequest.current = controller
+      setHazardLocation({ hazard: null })
+      try {
+        const hazard = await apiRequest<Hazard>(`/api/v1/disruption/hazards/${encodeURIComponent(id)}`, token, controller.signal)
+        if (controller.signal.aborted) return
+        if (!hazard) throw new Error('No hazard details returned')
+        setKind('')
+        setHazardLocation({ hazard })
+      } catch (failure) {
+        if (controller.signal.aborted) return
+        if (failure instanceof ApiError && failure.status === 401) { void signOut(failure.message); return }
+        const missing = failure instanceof ApiError && failure.status === 404
+        setHazardLocation({ hazard: null, error: missing ? 'This map hazard is unavailable in the list.' : 'Unable to locate this hazard in the list. Try again from the map.' })
+      }
+    })
+    return () => registerLocateHazardInList(() => {})
+  }, [hazardItems, registerLocateHazardInList, token, view])
+  useEffect(() => () => locateRequest.current?.abort(), [])
+
+  useEffect(() => {
+    if (!hazardLocation?.hazard) return
+    const card = document.getElementById(`hazard-${hazardLocation.hazard.disruptionId}`)
+    card?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    card?.focus({ preventScroll: true })
+  }, [hazardLocation])
 
   useEffect(() => {
     if (!edit || hazardItems.some(hazard => hazard.disruptionId === edit.advisory.disruptionId) ||
@@ -285,7 +327,15 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
     } finally { if (!controller.signal.aborted) setPending(false) }
   }
   const pendingAdvisories = advisories.items
-  return <section aria-label={view === 'notices' ? 'Public notice management' : 'Multi-hazard advisories'} className={view === 'notices' ? 'space-y-5' : 'space-y-5 border-t pt-6'}>
+  const locatedHazard = hazardLocation?.hazard
+  const listedHazards = locatedHazard && !hazardItems.some(hazard => hazard.disruptionId === locatedHazard.disruptionId)
+    ? [locatedHazard, ...hazardItems] : hazardItems
+  const hazardCards = listedHazards.map(hazard => {
+    const matchedTraffic = trafficIncidents?.find(incident => incident.disruptionId === hazard.disruptionId || incident.id === hazard.disruptionId)
+    const isAcknowledged = Boolean(dismissedAlertIds?.has(hazard.disruptionId) || (matchedTraffic && dismissedAlertIds?.has(matchedTraffic.id)))
+    return { hazard, matchedTraffic, isAcknowledged }
+  })
+  return <section ref={sectionRef} aria-label={view === 'notices' ? 'Public notice management' : 'Multi-hazard advisories'} className={view === 'notices' ? 'space-y-5' : 'scroll-mt-20 space-y-5 border-t pt-6'}>
     <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-xl font-semibold">{view === 'hazards' ? 'Multi-hazard conditions' : view === 'audit' ? 'Instruction and notice history' : view === 'notices' ? 'Managed notices' : 'Captain advisories'}</h2>
       {view === 'notices' && <div className="flex flex-wrap gap-2"><Button asChild variant="outline"><Link to="/notices" target="_blank" rel="noreferrer">Public notice board</Link></Button>
         <Button variant="outline" disabled={pending} onClick={() => openDraft({ id: crypto.randomUUID(), disruptionId: '', title: '', message: '', services: '', locations: '', from: '', until: '' })}>Draft notice</Button></div>}</div>
@@ -294,20 +344,22 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="max-w-xs space-y-2">
           <Label htmlFor="hazard-kind">Hazard type</Label>
-          <select id="hazard-kind" value={kind} onChange={e => setKind(e.target.value)} className="h-9 w-full rounded-md border bg-background px-3 text-sm">
+          <select id="hazard-kind" value={kind} onChange={e => {
+            locateRequest.current?.abort()
+            setHazardLocation(null)
+            setKind(e.target.value)
+          }} className="h-9 w-full rounded-md border bg-background px-3 text-sm">
             <option value="">All types</option>
             {[['TRAFFIC_INCIDENT', 'Traffic Incidents'], ['FLOOD', 'Floods'], ['RAIL_DISRUPTION', 'Rail Disruptions'], ['ROADWORKS', 'Roadworks']].map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
         </div>
-        {onAcknowledgeAllIncidents && hazards.items.some(h => {
-          const matched = trafficIncidents?.find(t => t.disruptionId === h.disruptionId || t.id === h.disruptionId)
-          return !dismissedAlertIds?.has(h.disruptionId) && (!matched || !dismissedAlertIds?.has(matched.id))
-        }) && (
+        {onAcknowledgeAllIncidents && hazardCards.some(card => !card.isAcknowledged) && (
           <Button
             variant="outline"
             size="sm"
             className="h-9 text-xs gap-1.5 border-rose-500/50 text-rose-900 dark:text-rose-200 hover:bg-rose-500/10"
-            onClick={onAcknowledgeAllIncidents}
+            onClick={() => onAcknowledgeAllIncidents(hazardCards.filter(card => !card.isAcknowledged).flatMap(({ hazard, matchedTraffic }) =>
+              matchedTraffic ? [hazard.disruptionId, matchedTraffic.id] : [hazard.disruptionId]))}
             title="Acknowledge all incident hazards"
           >
             <CheckCheck className="size-3.5 text-rose-600" />
@@ -315,29 +367,26 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
           </Button>
         )}
       </div>
+      {hazardLocation && !hazardLocation.hazard && (hazardLocation.error
+        ? <p role="alert" className="text-sm text-destructive">{hazardLocation.error}</p>
+        : <p role="status" className="text-sm text-muted-foreground">Finding the hazard in the list…</p>)}
       {hazards.isLoading && !hazards.latestPage && <p role="status" className="text-sm text-muted-foreground">Loading hazards…</p>}
       {hazards.error !== null && !hazards.items.length && <p role="alert" className="text-sm text-destructive">Hazards are unavailable.</p>}
-      {!hazards.isLoading && hazards.error === null && hazards.latestPage && !hazards.items.length && <p className="text-sm text-muted-foreground">{kind ? 'No hazards found for the selected type.' : 'No hazards found.'}</p>}
-      {!!hazards.items.length && <ScrollArea role="region" aria-label="Hazard conditions" tabIndex={0} className="h-[32rem] rounded-lg border"
+      {!hazards.isLoading && hazards.error === null && hazards.latestPage && !listedHazards.length && <p className="text-sm text-muted-foreground">{kind ? 'No hazards found for the selected type.' : 'No hazards found.'}</p>}
+      {!!hazardCards.length && <ScrollArea role="region" aria-label="Hazard conditions" tabIndex={0} className="h-[32rem] rounded-lg border"
         viewportProps={{ onScroll: hazards.onScroll }}>
-        <div className="space-y-3 p-1 pr-3.5">{hazards.items.map(h => {
+        <div className="space-y-3 p-1 pr-3.5">{hazardCards.map(({ hazard: h, matchedTraffic, isAcknowledged }) => {
           const explicitLoc = h.facts.locations?.find(l => typeof l.latitude === 'number' && typeof l.longitude === 'number' && validCoord(l.latitude, l.longitude))
-          const matchedTraffic = !explicitLoc && trafficIncidents
-            ? trafficIncidents.find(t => t.disruptionId === h.disruptionId || t.id === h.disruptionId)
-            : undefined
           const lat = explicitLoc?.latitude ?? matchedTraffic?.latitude ?? null
           const lon = explicitLoc?.longitude ?? matchedTraffic?.longitude ?? null
           const hasCoords = typeof lat === 'number' && typeof lon === 'number' && validCoord(lat, lon)
           const isSelected = selectedHazardId === h.disruptionId || (matchedTraffic && selectedHazardId === matchedTraffic.id)
-          const isAcknowledged = Boolean(
-            dismissedAlertIds?.has(h.disruptionId) ||
-            (matchedTraffic && dismissedAlertIds?.has(matchedTraffic.id))
-          )
 
           return (
             <Card
               key={h.disruptionId}
               id={`hazard-${h.disruptionId}`}
+              tabIndex={-1}
               className={cn("min-h-28 transition-all", isSelected && "ring-2 ring-amber-500 bg-amber-500/5 shadow-md")}
             >
               <CardContent className="space-y-3">
