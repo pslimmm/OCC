@@ -21,6 +21,8 @@ public final class RoutePositionPolicy {
     private static final double DEFAULT_IDENTITY_LINK_DISTANCE_METERS = 25;
     private static final double DEFAULT_IDENTITY_LINK_PROJECTION_SPEED_METERS_PER_SECOND = 7;
     private static final Duration DEFAULT_IDENTITY_ETA_TOLERANCE = Duration.ofSeconds(20);
+    private static final int STOP_ARRIVAL_QUEUE_SIZE = 3;
+    private static final double NEIGHBORING_QUEUE_LINK_DISTANCE_METERS = 50;
     private static final double DEFAULT_REFRESH_BOUNDARY_DISTANCE_METERS = 250;
     private static final Duration DEFAULT_REFRESH_BOUNDARY_WINDOW = Duration.ofSeconds(5);
     private static final Duration DEFAULT_REFRESH_BOUNDARY_ALLOWED_OVERLAP = Duration.ofMillis(250);
@@ -248,6 +250,7 @@ public final class RoutePositionPolicy {
 
     private static List<IdentityCluster> linkNearbyIdentities(List<IdentityGroup> identityGroups,
             Parameters parameters, Set<IdentityPair> coexistencePairs) {
+        Map<UUID, List<IdentityKey>> stopQueues = completeStopQueues(identityGroups);
         List<IdentityCluster> clusters = identityGroups.stream()
                 .map(group -> new IdentityCluster(List.of(group)))
                 .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
@@ -256,7 +259,7 @@ public final class RoutePositionPolicy {
             for (int firstIndex = 0; firstIndex < clusters.size(); firstIndex++) {
                 for (int secondIndex = firstIndex + 1; secondIndex < clusters.size(); secondIndex++) {
                     ClusterDistance distance = clusterDistance(clusters.get(firstIndex), clusters.get(secondIndex),
-                            parameters, coexistencePairs);
+                            parameters, coexistencePairs, stopQueues);
                     if (distance == null) continue;
                     ClusterPair candidate = new ClusterPair(firstIndex, secondIndex, distance);
                     if (closestPair == null || candidate.isBefore(closestPair)) closestPair = candidate;
@@ -274,7 +277,7 @@ public final class RoutePositionPolicy {
     }
 
     private static ClusterDistance clusterDistance(IdentityCluster first, IdentityCluster second,
-            Parameters parameters, Set<IdentityPair> coexistencePairs) {
+            Parameters parameters, Set<IdentityPair> coexistencePairs, Map<UUID, List<IdentityKey>> stopQueues) {
         double minimumDistance = Double.POSITIVE_INFINITY;
         double maximumDistance = 0;
         for (IdentityGroup firstGroup : first.groups()) {
@@ -286,11 +289,14 @@ public final class RoutePositionPolicy {
                     return null;
                 }
                 double distance = haversineMeters(firstGroup, secondGroup);
-                if (!Double.isFinite(distance) || distance > parameters.identityLinkDistanceMeters()) return null;
-                double etaGapSeconds = Math.abs(firstGroup.etaInterceptSeconds()
-                        - secondGroup.etaInterceptSeconds());
-                if (!Double.isFinite(etaGapSeconds)
-                        || etaGapSeconds > seconds(parameters.identityEtaTolerance())) {
+                if (!Double.isFinite(distance)) return null;
+                if (distance <= parameters.identityLinkDistanceMeters()) {
+                    double etaGapSeconds = Math.abs(firstGroup.etaInterceptSeconds()
+                            - secondGroup.etaInterceptSeconds());
+                    if (!Double.isFinite(etaGapSeconds)
+                            || etaGapSeconds > seconds(parameters.identityEtaTolerance())) return null;
+                } else if (distance > NEIGHBORING_QUEUE_LINK_DISTANCE_METERS
+                        || !matchesNeighboringStopQueues(firstGroup, secondGroup, stopQueues, parameters)) {
                     return null;
                 }
                 minimumDistance = Math.min(minimumDistance, distance);
@@ -298,6 +304,74 @@ public final class RoutePositionPolicy {
             }
         }
         return new ClusterDistance(minimumDistance, maximumDistance);
+    }
+
+    private static Map<UUID, List<IdentityKey>> completeStopQueues(List<IdentityGroup> groups) {
+        Map<UUID, List<RoutePositionReading>> snapshots = new LinkedHashMap<>();
+        for (IdentityGroup group : groups) {
+            for (RoutePositionReading reading : group.readings()) {
+                snapshots.computeIfAbsent(reading.snapshotId(), ignored -> new ArrayList<>()).add(reading);
+            }
+        }
+        Map<UUID, List<IdentityKey>> queues = new LinkedHashMap<>();
+        snapshots.forEach((snapshot, readings) -> {
+            if (readings.size() != STOP_ARRIVAL_QUEUE_SIZE) return;
+            readings.sort(Comparator.comparingInt(RoutePositionReading::visitOrder));
+            List<IdentityKey> queue = new ArrayList<>(STOP_ARRIVAL_QUEUE_SIZE);
+            for (RoutePositionReading reading : readings) {
+                if (reading.visitOrder() != queue.size() + 1) return;
+                IdentityKey identity = IdentityKey.from(reading);
+                if (queue.contains(identity)) return;
+                queue.add(identity);
+            }
+            queues.put(snapshot, queue);
+        });
+        return queues;
+    }
+
+    private static boolean matchesNeighboringStopQueues(IdentityGroup first, IdentityGroup second,
+            Map<UUID, List<IdentityKey>> stopQueues, Parameters parameters) {
+        IdentityGroup singleton = first.readings().size() == 1 ? first : second;
+        IdentityGroup established = singleton == first ? second : first;
+        if (singleton.readings().size() != 1 || established.readings().size() < 2) return false;
+        RoutePositionReading candidate = singleton.readings().getFirst();
+        List<IdentityKey> queue = stopQueues.get(candidate.snapshotId());
+        EtaPoint middle = etaPoint(candidate);
+        if (queue == null || middle == null) return false;
+
+        // The adjacent stops must agree on both other arrivals; only this slot can change.
+        List<IdentityKey> expectedQueue = new ArrayList<>(queue);
+        expectedQueue.set(candidate.visitOrder() - 1, established.identity());
+        RoutePositionReading before = null;
+        RoutePositionReading after = null;
+        for (RoutePositionReading reading : established.readings()) {
+            int stopOffset = reading.stopSequence() - candidate.stopSequence();
+            if (Math.abs(stopOffset) != 1 || !expectedQueue.equals(stopQueues.get(reading.snapshotId()))
+                    || Math.abs(reading.distanceAlongRouteM() - candidate.distanceAlongRouteM())
+                    > NEIGHBORING_QUEUE_LINK_DISTANCE_METERS) continue;
+            if (stopOffset < 0) {
+                if (before != null) return false;
+                before = reading;
+            } else {
+                if (after != null) return false;
+                after = reading;
+            }
+        }
+        if (before == null || after == null) return false;
+        if (Duration.between(candidate.fetchedAt(), before.fetchedAt()).abs()
+                        .compareTo(parameters.refreshBoundaryWindow()) > 0
+                && Duration.between(candidate.fetchedAt(), after.fetchedAt()).abs()
+                        .compareTo(parameters.refreshBoundaryWindow()) > 0) return false;
+
+        EtaPoint start = etaPoint(before);
+        EtaPoint end = etaPoint(after);
+        if (start == null || end == null || start.stopDistanceMeters() >= middle.stopDistanceMeters()
+                || middle.stopDistanceMeters() >= end.stopDistanceMeters()
+                || start.etaEpochSeconds() >= end.etaEpochSeconds()) return false;
+        double fraction = (middle.stopDistanceMeters() - start.stopDistanceMeters())
+                / (end.stopDistanceMeters() - start.stopDistanceMeters());
+        double expectedEta = start.etaEpochSeconds() + fraction * (end.etaEpochSeconds() - start.etaEpochSeconds());
+        return Math.abs(middle.etaEpochSeconds() - expectedEta) <= seconds(parameters.identityEtaTolerance());
     }
 
     private static List<IdentityCluster> applyCoordinatedRefreshBoundaries(List<IdentityCluster> linkedClusters,

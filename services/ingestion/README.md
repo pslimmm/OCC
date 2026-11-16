@@ -246,6 +246,14 @@ by any one stop snapshot, so repeated or co-located buses are not collapsed.
 identifier. This short-range linkage is limited to the replay-validated route
 lines 190 direction 1 and 190 direction 2.
 
+An isolated coordinate beyond the short-range limit can also be linked on
+those routes when it is within 50 m both on the route and in physical distance.
+The stops on both sides must report the same three arrivals with only that
+coordinate changed. At least one neighboring stop must be polled within the
+refresh window, and the candidate ETA must agree with interpolation between the
+neighboring ETAs within the identity ETA tolerance. A skipped route marker
+number alone does not trigger a merge.
+
 When a later stop snapshot contains one compatible row after an earlier
 snapshot established multiple buses, that row is treated as a merged
 measurement. The predictive association shares the measurement across the
