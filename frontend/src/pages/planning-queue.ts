@@ -21,12 +21,16 @@ export function isDiagnosisQueued(request: PlanningDiagnosisRequest) {
   return request.processingRequested && (request.status === 'PENDING' || request.status === 'FAILED_RETRYABLE')
 }
 
-function corridorDiagnosisStatus(requests: PlanningDiagnosisRequest[]): CorridorDiagnosisGroup['status'] {
-  if (requests.every(request => request.status === 'COMPLETED')) return 'COMPLETED'
-  if (requests.some(request => request.status === 'PROCESSING')) return 'PROCESSING'
-  if (requests.some(isDiagnosisQueued)) return 'QUEUED'
-  if (requests.some(request => request.status.startsWith('FAILED'))) return 'FAILED'
-  return 'PENDING'
+function summarizeCorridorDiagnosis(requests: PlanningDiagnosisRequest[]): Pick<CorridorDiagnosisGroup, 'representativeRequest' | 'status'> {
+  const processing = requests.find(request => request.status === 'PROCESSING')
+  if (processing) return { representativeRequest: processing, status: 'PROCESSING' }
+  const queued = requests.find(isDiagnosisQueued)
+  if (queued) return { representativeRequest: queued, status: 'QUEUED' }
+  const completed = requests.find(request => request.status === 'COMPLETED')
+  if (completed) return { representativeRequest: completed, status: 'COMPLETED' }
+  const failed = requests.find(request => request.status.startsWith('FAILED'))
+  if (failed) return { representativeRequest: failed, status: 'FAILED' }
+  return { representativeRequest: requests[0] ?? null, status: 'PENDING' }
 }
 
 export function buildCorridorGroups<TIncident extends RouteIncident>(
@@ -40,17 +44,7 @@ export function buildCorridorGroups<TIncident extends RouteIncident>(
   // 1. Live corridor incidents from Disruptions feed
   for (const corridor of corridors) {
     const corridorEventIds = new Set(corridor.alerts.map(a => a.eventId))
-    const corridorStopCodes = new Set(corridor.stopCodes)
-    const matchingRequests = requests.filter(req => {
-      if (matchedRequestIds.has(req.requestId)) return false
-      if (corridorEventIds.has(req.eventId)) return true
-      if (req.serviceId === corridor.serviceId &&
-          (corridor.directionId === null || req.directionId === null || req.directionId === corridor.directionId) &&
-          req.stopCode && corridorStopCodes.has(req.stopCode)) {
-        return true
-      }
-      return false
-    })
+    const matchingRequests = requests.filter(req => corridorEventIds.has(req.eventId) && !matchedRequestIds.has(req.requestId))
 
     matchingRequests.forEach(r => matchedRequestIds.add(r.requestId))
 
@@ -66,12 +60,11 @@ export function buildCorridorGroups<TIncident extends RouteIncident>(
       stopNames: corridor.stopNames,
       corridorIncident: corridor,
       requests: matchingRequests,
-      representativeRequest: matchingRequests[0] ?? null,
       firstDetectedAt: corridor.firstDetectedAt,
       latestDetectedAt: corridor.latestDetectedAt,
       gapSeconds: corridor.gapSeconds,
       isLive: !corridor.historical,
-      status: corridorDiagnosisStatus(matchingRequests),
+      ...summarizeCorridorDiagnosis(matchingRequests),
     })
   }
 
@@ -107,12 +100,11 @@ export function buildCorridorGroups<TIncident extends RouteIncident>(
       stopNames,
       corridorIncident: null,
       requests: bucket,
-      representativeRequest: first,
       firstDetectedAt: first.createdAt,
       latestDetectedAt: bucket.at(-1)!.createdAt,
       gapSeconds: null,
       isLive: false,
-      status: corridorDiagnosisStatus(bucket),
+      ...summarizeCorridorDiagnosis(bucket),
     })
   }
 

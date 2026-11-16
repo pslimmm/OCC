@@ -743,10 +743,13 @@ test('controller sees a requested diagnosis progress automatically', async ({ pa
     policyOutcome: null, createdAt: '2026-10-22T01:00:00Z',
   }
   await context.route('**/api/v1/planning/diagnoses?*', route => route.fulfill({ json: {
-    mode: 'DEMO', demoRunId: 'run-1', items: [{
-      ...request, status, processingRequested,
-      ...(status === 'COMPLETED' && { likelyCause: 'The trailing bus encountered a passenger surge.', confidence: 0.82, limitations: ['Crowding data was unavailable.'] }),
-    }], page: 0, totalItems: 1, totalPages: 1,
+    mode: 'DEMO', demoRunId: 'run-1', items: [
+      {
+        ...request, status, processingRequested,
+        ...(status === 'COMPLETED' && { likelyCause: 'The trailing bus encountered a passenger surge.', confidence: 0.82, limitations: ['Crowding data was unavailable.'] }),
+      },
+      { ...request, requestId: 'other-request', eventId: 'other-event', stopCode: '44241', processingRequested: false },
+    ], page: 0, totalItems: 2, totalPages: 1,
   } }))
   await context.route('**/api/v1/planning/diagnoses/trigger', route => {
     expect(route.request().method()).toBe('POST')
@@ -783,6 +786,7 @@ test('controller sees a requested diagnosis progress automatically', async ({ pa
   await expect(page.getByText('The trailing bus encountered a passenger surge.')).toBeVisible()
   await expect(page.getByText('Confidence: 82%')).toBeVisible()
   await expect(page.getByText('Crowding data was unavailable.')).toBeVisible()
+  await expect(queue.getByRole('option').filter({ hasText: 'Stop 44251' })).toContainText('Diagnosis generated.')
   expect(triggerCount).toBe(1)
 })
 

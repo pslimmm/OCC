@@ -3,6 +3,8 @@ import { renderToString } from 'react-dom/server'
 import { createElement } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { ControllerPlanning } from '../../src/pages/ControllerPlanning'
+import { buildCorridorGroups } from '../../src/pages/planning-queue'
+import { groupRouteIncidents } from '../../src/lib/route-strip'
 import type { PagedCollection, PagedResult } from '../../src/lib/paged-collection'
 import type { BunchingAlert, PendingRecommendation, PlanningDiagnosisRequest, PlanningDiagnosisRequestPage, RouteDirection } from '../../src/lib/api'
 import type { Planning } from '../../src/pages/ControllerPage'
@@ -709,5 +711,25 @@ test('multiple bunching alerts along the same active corridor are unified into o
   expect(html).toMatch(/Active\s*\(\s*(<!-- -->)?\s*1\s*(<!-- -->)?\s*\)/)
   // When stripLink is absent, fallback badge NextBus 1 & 2 is rendered
   expect(html).toMatch(/NextBus\s*(<!-- -->)?\s*1\s*(<!-- -->)?\s*&amp;\s*(<!-- -->)?\s*2/)
+  expect(html).toContain('>Diagnosis generated.</p>')
+  expect(html).toContain('>AI diagnosis</h3>')
+  expect(html).not.toContain('>Generate diagnosis</button>')
+})
+
+test('an older diagnosis at the same stop stays separate from the current corridor', () => {
+  const now = Date.now()
+  const pastRequest: PlanningDiagnosisRequest = {
+    ...sampleCompletedRequest,
+    stopCode: sampleAlert.stopCode,
+    createdAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+  }
+  const routes = [sampleRoute]
+  const alerts = [{ ...sampleAlert, detectedAt: new Date(now).toISOString() }]
+
+  const groups = buildCorridorGroups([sampleRequest, pastRequest], groupRouteIncidents(alerts, routes, now, 60), routes)
+
+  expect(groups).toHaveLength(2)
+  expect(groups[0]).toMatchObject({ isLive: true, status: 'PENDING', requests: [sampleRequest] })
+  expect(groups[1]).toMatchObject({ isLive: false, status: 'COMPLETED', requests: [pastRequest] })
 })
 

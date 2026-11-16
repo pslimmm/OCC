@@ -517,6 +517,10 @@ export function ControllerPlanning({
   // Locate matched corridor from deep-link parameters
   const matchedCorridor = useMemo(() => {
     if (!allCorridorGroups.length) return null
+    if (requestedRequestId) {
+      const match = allCorridorGroups.find(g => g.requests.some(r => r.requestId === requestedRequestId))
+      if (match) return match
+    }
     if (requestedIncident) {
       const incidentIds = new Set(requestedIncident.split(':').filter(Boolean))
       const match = allCorridorGroups.find(g =>
@@ -524,10 +528,6 @@ export function ControllerPlanning({
         g.requests.some(r => incidentIds.has(r.eventId)) ||
         g.corridorIncident?.alerts.some(a => incidentIds.has(a.eventId))
       )
-      if (match) return match
-    }
-    if (requestedRequestId) {
-      const match = allCorridorGroups.find(g => g.requests.some(r => r.requestId === requestedRequestId))
       if (match) return match
     }
     if (requestedEventId) {
@@ -606,7 +606,8 @@ export function ControllerPlanning({
   const editNeedsRevalidation = !!editingInScope && !editingItem && (!!modeError || recommendations.isLoading || recommendations.isLoadingMore ||
     recommendationHasMore || recommendationLoadError !== null)
 
-  const preferredCorridor = visibleCorridors.find(group => group.id === (selectedCorridorId ?? matchedCorridor?.id))
+  const preferredCorridor = visibleCorridors.find(group => group.id === selectedCorridorId)
+    ?? visibleCorridors.find(group => group.id === matchedCorridor?.id)
   const preferredRecommendation = visibleRecommendations.find(item => item.recommendationId === matchedRecommendation?.recommendationId)
   const isRequestSelection = Boolean(
     preferredCorridor && (requestedRequestId || !requestedId) ||
@@ -623,11 +624,15 @@ export function ControllerPlanning({
     if (requestedRequestId) {
       return selectedCorridor.requests.find(r => r.requestId === requestedRequestId) ?? selectedCorridor.representativeRequest
     }
-    if (requestedStop) {
+    if (requestedEventId && !requestedIncident) {
+      const linkedRequest = selectedCorridor.requests.find(r => r.eventId === requestedEventId)
+      if (linkedRequest) return linkedRequest
+    }
+    if (requestedStop && !requestedIncident) {
       return selectedCorridor.requests.find(r => r.stopCode === requestedStop) ?? selectedCorridor.representativeRequest
     }
     return selectedCorridor.representativeRequest ?? selectedCorridor.requests[0] ?? null
-  }, [selectedCorridor, requestedRequestId, requestedStop])
+  }, [selectedCorridor, requestedRequestId, requestedEventId, requestedIncident, requestedStop])
 
   const editorUnavailable = !!editingInScope && (!!modeError || recommendationLoadError !== null)
   const editorStale = editingRecommendation !== null && (editingRecommendation.scopeIdentity !== scopeIdentity ||
@@ -837,7 +842,7 @@ export function ControllerPlanning({
               </p>
             )}
             <p className="text-sm">{group.status === 'COMPLETED'
-              ? 'Diagnosis generated; keeping this corridor open for review.'
+              ? 'Diagnosis generated.'
               : group.status === 'PROCESSING' ? 'Diagnosis is being generated.'
               : group.status === 'QUEUED' ? 'Diagnosis is queued.'
               : group.status === 'FAILED' ? 'Diagnosis needs to be retried.' : 'Diagnosis has not been generated yet.'}</p>
