@@ -6,6 +6,7 @@ import argparse
 import concurrent.futures
 import http.client
 from pathlib import Path
+import re
 import socket
 import ssl
 import sys
@@ -188,6 +189,22 @@ def main() -> int:
     ]
     for label, path, expected, headers, method in cases:
         assert_status(base_url, label, path, expected, headers, method)
+
+    # The per-service docs pages reuse the page and contract each service
+    # already packages; the edge namespaces every URL they reference.
+    for service in ("ingestion", "planning", "disruption"):
+        time.sleep(0.06)
+        with open_url(base_url, f"/api-docs/v1/{service}") as response:
+            body = response.read().decode()
+        spec = f"/api-docs/v1/{service}/v3/{service}.json"
+        if spec not in body:
+            raise AssertionError(f"{service}: API docs page was not namespaced")
+        asset = re.search(rf"/api-docs/v1/{service}/webjars/swagger-ui/[^\"]+swagger-ui-bundle\.js", body)
+        if asset is None:
+            raise AssertionError(f"{service}: API docs page has no rewritten bundle URL")
+        assert_status(base_url, f"{service} API docs page", f"/api-docs/v1/{service}", 200)
+        assert_status(base_url, f"{service} API docs bundle", asset.group(0), 200)
+        assert_status(base_url, f"{service} committed contract", spec, 200)
 
     if args.token_dir:
         token_dir = args.token_dir
