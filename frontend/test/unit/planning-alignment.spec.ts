@@ -2,7 +2,9 @@ import { expect, test } from '@playwright/test'
 import { renderToString } from 'react-dom/server'
 import { createElement } from 'react'
 import { MemoryRouter } from 'react-router-dom'
-import { ControllerPlanning } from '../../src/pages/ControllerPlanning'
+import { ControllerPlanning, PlanningCorridorMap } from '../../src/pages/ControllerPlanning'
+import { buildCorridorGroups } from '../../src/pages/planning-queue'
+import { groupRouteIncidents } from '../../src/lib/route-strip'
 import type { PagedCollection, PagedResult } from '../../src/lib/paged-collection'
 import type { BunchingAlert, PendingRecommendation, PlanningDiagnosisRequest, PlanningDiagnosisRequestPage, RouteDirection } from '../../src/lib/api'
 import type { Planning } from '../../src/pages/ControllerPage'
@@ -293,7 +295,7 @@ test('ControllerPlanning defaults to Today and shows Cleared on route when deep-
 })
 
 
-test('ControllerPlanning renders supporting incident evidence with timing and distance for diagnosis', () => {
+test('ControllerPlanning renders incident evidence with timing and distance for diagnosis', () => {
   const requestWithEvidence: PlanningDiagnosisRequest = {
     ...sampleCompletedRequest,
     requestId: 'req-evidence-test',
@@ -345,13 +347,33 @@ test('ControllerPlanning renders supporting incident evidence with timing and di
     )
   )
 
-  expect(html).toContain('Supporting incident evidence')
+  expect(html).toContain('Incident evidence')
   expect(html).toContain('Roadwork / Traffic Delay')
   expect(html).toContain('Accident on Bukit Panjang Rd')
   expect(html).toMatch(/Approx\.\s*(<!-- -->)?\s*250\s*(<!-- -->)?\s*m from the supplied bus position near stop\s*(<!-- -->)?\s*40201/)
   expect(html).toContain('Reported 2:15 before first confirmed bunching irregularity.')
   expect(html).toMatch(/Incident evidence:\s*(<!-- -->)?\s*evi-road-1/)
   expect(html).toContain('Bus-position evidence: evi-bus-pos-1')
+})
+
+test('the simulated recommendation highlights every reviewed bus even when only one pair links to the map', () => {
+  const html = renderToString(createElement(PlanningCorridorMap, {
+    routes: [sampleRoute], serviceId: '190', directionId: 2, monitoredStopCode: '40191', simulation: true,
+    busReferences: ['demo-190-1', 'demo-190-2', 'demo-190-3'],
+    corridorIncident: {
+      id: 'three-bus-incident', serviceId: '190', directionId: 2, routeKey: '190:SMRT:2', stopCodes: ['40191'],
+      stopNames: ['Opp Blk 223'], firstDetectedAt: sampleAlert.detectedAt, latestDetectedAt: sampleAlert.detectedAt,
+      gapSeconds: 45, ageSeconds: 0, latestStopIndex: 0, historical: false, alerts: [],
+      stripLink: { frontOrder: 1, followingOrder: 2, stopCode: '40191', match: 'evidence' },
+    },
+    positions: [{
+      serviceId: '190', computedAt: sampleAlert.detectedAt, refreshIntervalSeconds: 1, maxSourceAgeSeconds: 60,
+      directions: [{ operator: 'SMRT', directionId: 2, routeLengthM: 900,
+        buses: [1, 2, 3].map(order => ({ order, distanceAlongRouteM: (3 - order) * 430, speedMps: 8.33, uncertaintyM: 20 })) }],
+    }],
+  }))
+
+  expect(html).toContain('Demo bus 3 on service 190 - Part of the selected bunching group')
 })
 
 test('ControllerPlanning renders PlanningCorridorMap with control stop, bunched buses, and fit controls in RecommendationDetail', () => {
@@ -417,23 +439,19 @@ test('ControllerPlanning renders PlanningCorridorMap with control stop, bunched 
     },
   ]
 
-  const recommendations = mockPagedCollection<PendingRecommendation, Planning['recommendations']>(
-    [sampleRecommendation],
-    { items: [sampleRecommendation], page: 0, totalItems: 1, totalPages: 1, mode: 'LIVE', demoRunId: null }
-  )
-  const diagnosisRequests = mockPagedCollection<PlanningDiagnosisRequest, PlanningDiagnosisRequestPage>(
-    [], { items: [], page: 0, totalItems: 0, totalPages: 0, mode: 'LIVE', demoRunId: null }
-  )
-
-  const html = renderToString(
+  const renderRecommendation = (recommendation: PendingRecommendation, mode: 'LIVE' | 'DEMO', demoRunId: string | null) => renderToString(
     createElement(MemoryRouter, { initialEntries: ['/controller/planning?recommendation=rec-test-1'] },
       createElement(ControllerPlanning, {
-        recommendations,
-        diagnosisRequests,
+        recommendations: mockPagedCollection<PendingRecommendation, Planning['recommendations']>([recommendation], {
+          items: [recommendation], page: 0, totalItems: 1, totalPages: 1, mode, demoRunId,
+        }),
+        diagnosisRequests: mockPagedCollection<PlanningDiagnosisRequest, PlanningDiagnosisRequestPage>([], {
+          items: [], page: 0, totalItems: 0, totalPages: 0, mode, demoRunId,
+        }),
         loading: false,
         modeError: '',
-        mode: 'LIVE',
-        demoRunId: null,
+        mode,
+        demoRunId,
         token: 'test-token',
         detectedAlerts: [sampleAlert],
         routes: [sampleRoute],
@@ -446,12 +464,17 @@ test('ControllerPlanning renders PlanningCorridorMap with control stop, bunched 
     )
   )
 
+  const html = renderRecommendation(sampleRecommendation, 'LIVE', null)
   expect(html).toContain('Assigned control stop &amp; corridor')
   expect(html).toContain('Target control stop:')
   expect(html).toMatch(/Assigned action:\s*(<!-- -->)?\s*HOLD/)
   expect(html).toContain('Fit corridor')
   expect(html).toContain('1 · 2 · 3')
   expect(html).toContain('Buses bunching')
+  const simulationHtml = renderRecommendation({ ...sampleRecommendation, classification: 'SIMULATION' }, 'DEMO', 'test-run')
+  expect(simulationHtml).toContain('Fit demo buses')
+  expect(simulationHtml).toContain('Hold unavailable. The control stop is no longer this bus’s next stop.')
+  expect(simulationHtml).not.toContain('Hold for 45 seconds at stop 40191.')
 })
 
 test('ControllerPlanning displays linked bunching buses pill in corridor group and diagnosis detail', () => {
@@ -709,5 +732,25 @@ test('multiple bunching alerts along the same active corridor are unified into o
   expect(html).toMatch(/Active\s*\(\s*(<!-- -->)?\s*1\s*(<!-- -->)?\s*\)/)
   // When stripLink is absent, fallback badge NextBus 1 & 2 is rendered
   expect(html).toMatch(/NextBus\s*(<!-- -->)?\s*1\s*(<!-- -->)?\s*&amp;\s*(<!-- -->)?\s*2/)
+  expect(html).toContain('>Diagnosis generated.</p>')
+  expect(html).toContain('>Diagnosis</h3>')
+  expect(html).not.toContain('>Generate diagnosis</button>')
+})
+
+test('an older diagnosis at the same stop stays separate from the current corridor', () => {
+  const now = Date.now()
+  const pastRequest: PlanningDiagnosisRequest = {
+    ...sampleCompletedRequest,
+    stopCode: sampleAlert.stopCode,
+    createdAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+  }
+  const routes = [sampleRoute]
+  const alerts = [{ ...sampleAlert, detectedAt: new Date(now).toISOString() }]
+
+  const groups = buildCorridorGroups([sampleRequest, pastRequest], groupRouteIncidents(alerts, routes, now, 60), routes)
+
+  expect(groups).toHaveLength(2)
+  expect(groups[0]).toMatchObject({ isLive: true, status: 'PENDING', requests: [sampleRequest] })
+  expect(groups[1]).toMatchObject({ isLive: false, status: 'COMPLETED', requests: [pastRequest] })
 })
 

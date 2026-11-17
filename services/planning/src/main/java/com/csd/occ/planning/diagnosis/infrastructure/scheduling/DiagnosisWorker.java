@@ -1,7 +1,9 @@
 package com.csd.occ.planning.diagnosis.infrastructure.scheduling;
 
+import com.csd.occ.planning.advisory.domain.HazardAdvisoryProcessor;
 import com.csd.occ.planning.diagnosis.domain.DiagnosisRequestService;
 import com.csd.occ.planning.diagnosis.domain.DeliveryClaim;
+import com.csd.occ.planning.diagnosis.domain.PlanningScopePort;
 import com.csd.occ.planning.diagnosis.domain.RecommendationDeliveryService;
 import com.csd.occ.planning.diagnosis.domain.RecommendationSubmissionPort;
 import com.csd.occ.planning.diagnosis.domain.RetryBackoffPolicy;
@@ -23,23 +25,36 @@ public class DiagnosisWorker {
     private final RecommendationSubmissionPort recommendation;
     private final DiagnosisProperties properties;
     private final Clock clock;
-    private final com.csd.occ.planning.advisory.domain.HazardAdvisoryProcessor hazards;
+    private final HazardAdvisoryProcessor hazards;
+    private final PlanningScopePort scopes;
     private final RetryBackoffPolicy retryBackoff = new RetryBackoffPolicy();
 
     public DiagnosisWorker(DiagnosisRequestService requests, RootCauseDiagnosisProcessor processor,
             RecommendationDeliveryService deliveries, RecommendationSubmissionPort recommendation,
-            DiagnosisProperties properties, Clock clock, com.csd.occ.planning.advisory.domain.HazardAdvisoryProcessor hazards) {
+            DiagnosisProperties properties, Clock clock, HazardAdvisoryProcessor hazards, PlanningScopePort scopes) {
         this.requests = requests; this.processor = processor; this.deliveries = deliveries;
         this.recommendation = recommendation; this.properties = properties; this.clock = clock;
         this.hazards = hazards;
+        this.scopes = scopes;
+    }
+
+    @Scheduled(fixedDelayString = "${occ.diagnosis.worker-interval}", scheduler = "bunchingDiagnosisScheduler")
+    public void processDueBunchingDiagnoses() {
+        // Claim one diagnosis so its lease does not run down while another model call is in progress.
+        requests.claimDueBunchingDiagnoses(1, properties.leaseDuration(), properties.autoProcessBunching())
+                .forEach(processor::process);
+        deliverDueRecommendations();
     }
 
     @Scheduled(fixedDelayString = "${occ.diagnosis.worker-interval}")
-    public void processDueWork() {
-        // AI calls can outlive the queue lease; claim one diagnosis at a time to avoid duplicate model work.
-        List<java.util.UUID> requestIds = requests.claimDueRequests(1, properties.leaseDuration(), properties.autoProcessBunching());
-        requestIds.forEach(id -> { if (!hazards.processIfHazard(id)) processor.process(id); });
-        deliverDueRecommendations();
+    public void processDueHazards() {
+        requests.claimDueHazards(1, properties.leaseDuration()).forEach(hazards::processIfHazard);
+    }
+
+    @Scheduled(fixedDelayString = "${occ.diagnosis.worker-interval}", scheduler = "simulationCautionScheduler")
+    public void processDueSimulationCautions() {
+        requests.claimDueSimulationCautions(1, properties.leaseDuration(), scopes.current())
+                .forEach(hazards::processIfHazard);
     }
 
     public void deliverDueRecommendations() {

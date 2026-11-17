@@ -43,7 +43,7 @@ class PacingSnapshotControllerTest {
     private static final Instant NOW = Instant.parse("2026-10-21T05:00:10Z");
     private static final PacingSnapshot SNAPSHOT = new PacingSnapshot(NOW, List.of(
             metric("DEMO-BUS-190-01", Optional.empty(), Optional.of(gap(45, PacingState.TOO_CLOSE))),
-            metric("DEMO-BUS-190-02", Optional.of(gap(45, PacingState.TOO_CLOSE)), Optional.empty())));
+            metric("DEMO-BUS-190-02", Optional.of(gap(45, PacingState.TOO_CLOSE)), Optional.empty())), Optional.empty());
 
     @Autowired MockMvc mvc;
     @MockitoBean PacingService pacing;

@@ -2,9 +2,11 @@ package com.csd.occ.planning.diagnosis.infrastructure.config;
 
 import java.net.http.HttpClient;
 import java.time.Clock;
+import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.web.client.RestClient;
 import com.csd.occ.planning.diagnosis.infrastructure.http.BoundedResponseBodyInterceptor;
 import com.csd.occ.planning.diagnosis.domain.DiagnosisPolicySettings;
@@ -15,6 +17,25 @@ public class DiagnosisConfig {
     @Bean
     Clock diagnosisClock() {
         return Clock.systemUTC();
+    }
+
+    @Bean
+    ThreadPoolTaskScheduler taskScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.build();
+    }
+
+    @Bean
+    ThreadPoolTaskScheduler bunchingDiagnosisScheduler() {
+        var scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setThreadNamePrefix("bunching-diagnosis-");
+        return scheduler;
+    }
+
+    @Bean
+    ThreadPoolTaskScheduler simulationCautionScheduler() {
+        var scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setThreadNamePrefix("simulation-caution-");
+        return scheduler;
     }
 
     @Bean

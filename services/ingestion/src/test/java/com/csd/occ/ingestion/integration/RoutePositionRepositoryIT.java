@@ -38,25 +38,20 @@ class RoutePositionRepositoryIT {
         Flyway.configure().dataSource(dataSource).defaultSchema("ingestion").schemas("ingestion")
                 .locations("classpath:db/migration").load().migrate();
         repository = new PostgisRoutePositionRepository(jdbc);
+        Timestamp activatedAt = Timestamp.from(Instant.parse("2026-10-24T00:00:00Z"));
+        jdbc.update("""
+                INSERT INTO ingestion.reference_dataset_version
+                    (id, dataset, version_key, checksum, status, imported_at, activated_at)
+                VALUES (?, 'BUS_TOPOLOGY', 'fixture', ?, 'ACTIVE', ?, ?)
+                """, VERSION_ID, "a".repeat(64), activatedAt, activatedAt);
     }
 
     @Test
     void mapsOpenAndCircularRoutesWithoutDuplicatingRepeatedStops() {
         Instant now = Instant.parse("2026-10-24T00:00:00Z");
         UUID pollCycleId = UUID.randomUUID();
-        jdbc.update("""
-                INSERT INTO ingestion.reference_dataset_version
-                    (id, dataset, version_key, checksum, status, imported_at, activated_at)
-                VALUES (?, 'BUS_TOPOLOGY', 'fixture', ?, 'ACTIVE', ?, ?)
-                """, VERSION_ID, "a".repeat(64), Timestamp.from(now), Timestamp.from(now));
-        jdbc.update("""
-                INSERT INTO ingestion.bus_service (reference_version_id, service_id, operator, category)
-                VALUES (?, '190', 'SMRT', 'TRUNK')
-                """, VERSION_ID);
-        jdbc.update("""
-                INSERT INTO ingestion.bus_service (reference_version_id, service_id, operator, category)
-                VALUES (?, '972', 'SMRT', 'TRUNK')
-                """, VERSION_ID);
+        insertService("190");
+        insertService("972");
         insertStop("A", 103.800, 1.300);
         insertStop("B", 103.810, 1.300);
         insertStop("C", 103.820, 1.300);
@@ -152,6 +147,38 @@ class RoutePositionRepositoryIT {
                 .isCloseTo(0.0, org.assertj.core.data.Offset.offset(2.0));
         assertThat(circularReading.projectionCandidates().getLast().distanceAlongRouteM())
                 .isCloseTo(circular.routeLengthM(), org.assertj.core.data.Offset.offset(2.0));
+    }
+
+    @Test
+    void retainsFreshReadingsFromACompletedSweepWithAnOlderStopPoll() {
+        Instant now = Instant.parse("2026-10-24T01:00:00Z");
+        UUID pollCycleId = UUID.randomUUID();
+        insertService("970");
+        insertStop("G", 103.800, 1.300);
+        insertStop("H", 103.810, 1.300);
+        insertRouteStop("970", 1, 1, "G", 0.0);
+        insertRouteStop("970", 1, 2, "H", 1.1);
+        insertPollTarget("970", "G", now);
+        insertPollTarget("970", "H", now);
+        insertObservation(UUID.randomUUID(), pollCycleId, "970", "G", 1, 103.800,
+                null, null, null, now.plusSeconds(60), now.minusSeconds(121));
+        UUID freshObservation = UUID.randomUUID();
+        insertObservation(freshObservation, pollCycleId, "970", "H", 1, 103.810,
+                null, null, null, now.plusSeconds(120), now.minusSeconds(5));
+
+        var routes = repository.findRoutesWithObservations("970", now.minusSeconds(120), now);
+
+        assertThat(routes).singleElement().satisfies(route -> {
+            assertThat(route.selectedPollCycleId()).isEqualTo(pollCycleId);
+            assertThat(route.readings()).extracting(reading -> reading.observationId()).containsExactly(freshObservation);
+        });
+    }
+
+    private void insertService(String serviceId) {
+        jdbc.update("""
+                INSERT INTO ingestion.bus_service (reference_version_id, service_id, operator, category)
+                VALUES (?, ?, 'SMRT', 'TRUNK')
+                """, VERSION_ID, serviceId);
     }
 
     private void insertStop(String code, double longitude, double latitude) {

@@ -19,6 +19,7 @@ public class DemoFleetController {
     @GetMapping("/internal/v1/ingestion/demo-fleet")
     @Operation(operationId = "getDemoFleet", summary = "Read current simulation assignments and progress",
             description = "Requires the Planning or Disruption peer capability. Closed/preparing runs return no current buses. "
+                    + "Current route progress follows the moving bus and is provided separately from its captured replay prediction. "
                     + "page defaults to 0; size defaults to 20 and is bounded to 1–100; sorted by busId.")
     @ApiResponse(responseCode = "200", description = "Simulation fleet page")
     @ApiResponse(responseCode = "400", description = "Invalid pagination or run identity")

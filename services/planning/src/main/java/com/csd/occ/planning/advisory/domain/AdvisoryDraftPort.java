@@ -1,7 +1,7 @@
 package com.csd.occ.planning.advisory.domain;
 
 public interface AdvisoryDraftPort {
-    Result propose(AdvisoryContextPort.Hazard hazard, AdvisoryContextPort.Bus bus);
+    Result propose(AdvisoryContextPort.Hazard hazard, AdvisoryContextPort.Bus bus, AdvisoryContextPort.Limits limits);
     default NoticeSuggestion suggestNotice(AdvisoryContextPort.Hazard hazard) {
         var facts = hazard.facts();
         var title = facts.title() == null || facts.title().isBlank() ? "Service disruption update" : facts.title().strip();

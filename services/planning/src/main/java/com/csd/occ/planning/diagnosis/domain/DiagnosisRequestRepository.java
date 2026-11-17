@@ -11,6 +11,10 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface DiagnosisRequestRepository extends JpaRepository<DiagnosisRequest, UUID> {
+    String SIMULATION_CAUTION = "(event_type = 'HAZARD' and cast(input_snapshot as jsonb)->>'classification' = 'SIMULATION' "
+            + "and cast(input_snapshot as jsonb)->'hazardSnapshot'->'facts'->>'kind' in (:cautionKinds))";
+    String DUE = "((status in ('PENDING','FAILED_RETRYABLE') and next_attempt_at <= :now) "
+            + "or (status = 'PROCESSING' and lease_until <= :now))";
     @Query(value = """
             select * from planning.planning_request
             where event_type = 'BUS_BUNCHING' and input_snapshot is not null
@@ -99,18 +103,28 @@ public interface DiagnosisRequestRepository extends JpaRepository<DiagnosisReque
             @Param("producer") String producer, @Param("eventId") UUID eventId,
             @Param("schemaVersion") String schemaVersion, @Param("now") Instant now);
 
-    @Query(value = "select * from planning.planning_request where "
-            + "((status in ('PENDING','FAILED_RETRYABLE') and next_attempt_at <= :now) "
-            + "or (status = 'PROCESSING' and lease_until <= :now)) "
-            + "order by created_at limit :batchSize for update skip locked", nativeQuery = true)
-    List<DiagnosisRequest> findClaimable(@Param("now") Instant now, @Param("batchSize") int batchSize);
+    @Query(value = "select * from planning.planning_request where event_type = 'BUS_BUNCHING' "
+            + "and (:autoProcessBunching or processing_requested or attempt_count > 0) and " + DUE + " "
+            + "order by processing_requested desc, created_at, id "
+            + "limit :batchSize for update skip locked", nativeQuery = true)
+    List<DiagnosisRequest> findClaimableBunchingDiagnoses(@Param("now") Instant now,
+            @Param("batchSize") int batchSize, @Param("autoProcessBunching") boolean autoProcessBunching);
 
-    @Query(value = "select * from planning.planning_request where "
-            + "(event_type in ('HAZARD','TRAFFIC_INCIDENT') or processing_requested or attempt_count > 0) and "
-            + "(((status in ('PENDING','FAILED_RETRYABLE') and next_attempt_at <= :now) "
-            + "or (status = 'PROCESSING' and lease_until <= :now))) "
-            + "order by created_at limit :batchSize for update skip locked", nativeQuery = true)
-    List<DiagnosisRequest> findClaimableRequestedOrHazards(@Param("now") Instant now, @Param("batchSize") int batchSize);
+    @Query(value = "select * from planning.planning_request where event_type in ('HAZARD','TRAFFIC_INCIDENT') and "
+            + DUE + " "
+            + "and " + SIMULATION_CAUTION + " is not true "
+            + "order by created_at, id "
+            + "limit :batchSize for update skip locked", nativeQuery = true)
+    List<DiagnosisRequest> findClaimableHazards(@Param("now") Instant now, @Param("batchSize") int batchSize,
+            @Param("cautionKinds") List<String> cautionKinds);
+
+    @Query(value = "select * from planning.planning_request where " + SIMULATION_CAUTION
+            + " and " + DUE + " "
+            + "order by (cast(input_snapshot as jsonb)->>'demoRunId' = :activeRunId) desc nulls last, "
+            + "(cast(input_snapshot as jsonb)->'hazardSnapshot'->>'action' <> 'REASSESSED') desc nulls last, "
+            + "created_at desc, id limit :batchSize for update skip locked", nativeQuery = true)
+    List<DiagnosisRequest> findClaimableSimulationCautions(@Param("now") Instant now, @Param("batchSize") int batchSize,
+            @Param("activeRunId") String activeRunId, @Param("cautionKinds") List<String> cautionKinds);
 
     @Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
     Optional<DiagnosisRequest> findFirstByEventIdOrderByCreatedAtDesc(UUID eventId);

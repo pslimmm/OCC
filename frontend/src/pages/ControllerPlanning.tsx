@@ -8,13 +8,14 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { PagedCollectionControls } from '@/components/PagedCollectionControls'
-import { ApiError, apiRequest, triggerDiagnosis, type BunchingAlert, type ControllerBusInstruction, type Decision, type DiagnosisEvidenceDetail, type EarlyControllerSuggestion, type PendingRecommendation, type PlanningDiagnosisRequest, type PlanningDiagnosisRequestPage, type RouteDirection, type RoutePositions, type RouteStop, type TrafficIncident } from '@/lib/api'
+import { ApiError, apiRequest, triggerDiagnosis, type BunchingAlert, type ControllerBusInstruction, type Decision, type DiagnosisEvidenceDetail, type EarlyControllerSuggestion, type PendingRecommendation, type PlanningDiagnosisRequest, type PlanningDiagnosisRequestPage, type RouteDirection, type RoutePositions, type TrafficIncident } from '@/lib/api'
 import { signOut } from '@/lib/auth'
 import { bunchingArrivals } from '@/lib/bunching'
-import { groupRouteIncidents, linkIncidentToPosition, routeKey, type IncidentStripLink, type RouteIncident } from '@/lib/route-strip'
+import { groupRouteIncidents, linkIncidentToPosition, routeKey, routeStopDistances, type IncidentStripLink, type RouteIncident } from '@/lib/route-strip'
 import type { Planning } from './ControllerPage'
+import { buildCorridorGroups, isActiveRecommendation, isDiagnosisQueued, type CorridorDiagnosisGroup as PlanningCorridorGroup } from './planning-queue'
 import type { PagedCollection } from '@/lib/paged-collection'
-import { BunchingMap, DataMessage, distanceMeters, timestamp, validCoord, type MapHazard, type PositionedIncident } from './ControllerViews'
+import { BunchingMap, categorizeHazard, DataMessage, distanceMeters, timestamp, validCoord, type MapHazard, type PositionedIncident } from './ControllerViews'
 import { adjacentBunchingGaps, alertFallbackVisitOrders, bunchedArrivalGaps, formatGap } from '@/lib/route-strip'
 
 function seconds(value: number) {
@@ -164,6 +165,29 @@ function extractBusOrders(references: string[], alert?: BunchingAlert): number[]
   return [...orders].sort((a, b) => a - b)
 }
 
+function busesWithDifferentNextStop(recommendation: PendingRecommendation, routes: RouteDirection[], positions: RoutePositions[]) {
+  const unavailable = new Set<string>()
+  if (recommendation.classification !== 'SIMULATION') return unavailable
+  const route = routes.find(candidate => candidate.serviceId === recommendation.serviceId && candidate.directionId === recommendation.directionId)
+  const direction = positions.find(snapshot => snapshot.serviceId === recommendation.serviceId)?.directions
+    .find(candidate => candidate.directionId === recommendation.directionId && candidate.operator === route?.operator)
+  if (!route || !direction) return unavailable
+  const { distancesM, hasGeometry } = routeStopDistances(route, direction.routeLengthM)
+  if (!hasGeometry) return unavailable
+  for (const reference of affectedBuses(recommendation)) {
+    const order = extractBusOrders([reference])[0]
+    const bus = direction.buses.find(candidate => candidate.order === order)
+    if (!bus) continue
+    const nextIndex = distancesM.findIndex(distance => distance >= bus.distanceAlongRouteM)
+    const nextStop = route.stops[nextIndex]
+    if (nextStop && (nextStop.stopCode !== recommendation.controlStopCode ||
+      (recommendation.controlStopSequence != null && nextStop.stopSequence !== recommendation.controlStopSequence))) {
+      unavailable.add(reference)
+    }
+  }
+  return unavailable
+}
+
 export function PlanningCorridorMap({
   routes,
   positions = [],
@@ -180,7 +204,9 @@ export function PlanningCorridorMap({
   subtitle,
   evidenceDetails,
   trafficIncidents = [],
+  simulationHazards = [],
   isHistorical: isHistoricalProp,
+  simulation = false,
 }: {
   routes: RouteDirection[]
   positions?: RoutePositions[]
@@ -197,7 +223,9 @@ export function PlanningCorridorMap({
   subtitle?: React.ReactNode
   evidenceDetails?: DiagnosisEvidenceDetail[]
   trafficIncidents?: TrafficIncident[]
+  simulationHazards?: MapHazard[]
   isHistorical?: boolean
+  simulation?: boolean
 }) {
   const [focusIncident, setFocusIncident] = useState(true)
 
@@ -273,19 +301,19 @@ export function PlanningCorridorMap({
     if (computedStripLink) {
       keys.add(`${serviceId}-${computedStripLink.frontOrder}`)
       keys.add(`${serviceId}-${computedStripLink.followingOrder}`)
-      return keys
+      if (!simulation) return keys
     }
     for (const order of busOrders) {
       keys.add(`${serviceId}-${order}`)
     }
-    if (!busOrders.length && alert && alert.classification !== 'OBSERVATION_ONLY') {
+    if ((simulation || !busOrders.length) && alert && alert.classification !== 'OBSERVATION_ONLY') {
       for (const pair of bunchedArrivalGaps(alert)) {
         keys.add(`${serviceId}-${pair.leadingOrder}`)
         keys.add(`${serviceId}-${pair.followingOrder}`)
       }
     }
     return keys
-  }, [computedStripLink, busOrders, alert, serviceId])
+  }, [computedStripLink, busOrders, alert, serviceId, simulation])
 
   const selectedIncident = useMemo<PositionedIncident>(() => ({
     id: `planning-${serviceId}-${directionId ?? 1}-${targetStopCode}`,
@@ -305,28 +333,25 @@ export function PlanningCorridorMap({
   }), [serviceId, directionId, targetStopCode, affectedStopCodes, targetStopName, alert, computedStripLink, corridorIncident, isHistorical])
 
   const corridorHazards = useMemo<MapHazard[]>(() => {
-    const list: MapHazard[] = []
-    const seen = new Set<string>()
-
-    if (evidenceDetails) {
-      for (const d of evidenceDetails) {
-        if (validCoord(d.latitude, d.longitude) && !seen.has(d.evidenceId)) {
-          seen.add(d.evidenceId)
-          list.push({
-            id: d.evidenceId,
-            latitude: d.latitude!,
-            longitude: d.longitude!,
-            incidentType: d.incidentType,
-            message: d.message,
-          })
-        }
-      }
+    const injected = simulation ? simulationHazards.filter(hazard => hazard.serviceId === serviceId &&
+      (directionId === null || hazard.directionId === directionId)) : []
+    const list = [...injected]
+    const seen = new Set(injected.map(hazard => hazard.id))
+    const overlapsInjected = (hazard: MapHazard) => injected.some(current =>
+      current.latitude === hazard.latitude && current.longitude === hazard.longitude &&
+      categorizeHazard(current) === categorizeHazard(hazard))
+    for (const detail of evidenceDetails ?? []) {
+      if (!validCoord(detail.latitude, detail.longitude) || seen.has(detail.evidenceId)) continue
+      const hazard = { id: detail.evidenceId, latitude: detail.latitude!, longitude: detail.longitude!,
+        incidentType: detail.incidentType, message: detail.message }
+      if (!overlapsInjected(hazard)) list.push(hazard)
+      seen.add(hazard.id)
     }
 
     if (trafficIncidents.length) {
       const stops = corridorRoutes.flatMap(r => r.stops).filter(s => validCoord(s.latitude, s.longitude))
       for (const inc of trafficIncidents) {
-        if (validCoord(inc.latitude, inc.longitude) && !seen.has(inc.id)) {
+        if (validCoord(inc.latitude, inc.longitude) && !seen.has(inc.id) && !(inc.disruptionId && seen.has(inc.disruptionId))) {
           const isNear = !stops.length || stops.some(s => distanceMeters(inc.latitude!, inc.longitude!, s.latitude!, s.longitude!) <= 2500)
           if (isNear) {
             seen.add(inc.id)
@@ -343,7 +368,7 @@ export function PlanningCorridorMap({
     }
 
     return list
-  }, [evidenceDetails, trafficIncidents, corridorRoutes])
+  }, [evidenceDetails, trafficIncidents, simulationHazards, simulation, serviceId, directionId, corridorRoutes])
 
   if (!corridorRoutes.length) return null
 
@@ -373,131 +398,13 @@ export function PlanningCorridorMap({
         subtitle={subtitle ?? defaultSubtitle}
         mapHeightClassName="h-60 sm:h-64"
         hazards={corridorHazards}
+        simulationFleet={simulation}
       />
     </div>
   )
 }
 
-export type CorridorDiagnosisGroup = {
-  id: string
-  serviceId: string
-  directionId: number | null
-  stopCodes: string[]
-  stopNames: string[]
-  corridorIncident: PositionedIncident | null
-  requests: PlanningDiagnosisRequest[]
-  representativeRequest: PlanningDiagnosisRequest | null
-  firstDetectedAt: string
-  latestDetectedAt: string
-  gapSeconds: number | null
-  isLive: boolean
-  status: 'PENDING' | 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
-}
-
-function isDiagnosisQueued(request: PlanningDiagnosisRequest) {
-  return request.processingRequested && (request.status === 'PENDING' || request.status === 'FAILED_RETRYABLE')
-}
-
-function corridorDiagnosisStatus(requests: PlanningDiagnosisRequest[]): CorridorDiagnosisGroup['status'] {
-  if (requests.every(request => request.status === 'COMPLETED')) return 'COMPLETED'
-  if (requests.some(request => request.status === 'PROCESSING')) return 'PROCESSING'
-  if (requests.some(isDiagnosisQueued)) return 'QUEUED'
-  if (requests.some(request => request.status.startsWith('FAILED'))) return 'FAILED'
-  return 'PENDING'
-}
-
-function buildCorridorGroups(
-  requests: PlanningDiagnosisRequest[],
-  liveCorridors: PositionedIncident[],
-  routes: RouteDirection[]
-): CorridorDiagnosisGroup[] {
-  const matchedRequestIds = new Set<string>()
-  const groups: CorridorDiagnosisGroup[] = []
-
-  // 1. Live corridor incidents from Disruptions feed
-  for (const corridor of liveCorridors) {
-    const corridorEventIds = new Set(corridor.alerts.map(a => a.eventId))
-    const corridorStopCodes = new Set(corridor.stopCodes)
-    const matchingRequests = requests.filter(req => {
-      if (matchedRequestIds.has(req.requestId)) return false
-      if (corridorEventIds.has(req.eventId)) return true
-      if (req.serviceId === corridor.serviceId &&
-          (corridor.directionId === null || req.directionId === null || req.directionId === corridor.directionId) &&
-          req.stopCode && corridorStopCodes.has(req.stopCode)) {
-        return true
-      }
-      return false
-    })
-
-    matchingRequests.forEach(r => matchedRequestIds.add(r.requestId))
-
-    // A detection without a durable Planning request has no actionable identity.
-    // Keep it on Disruptions rather than selecting an empty planning detail.
-    if (!matchingRequests.length) continue
-
-    groups.push({
-      id: corridor.id,
-      serviceId: corridor.serviceId,
-      directionId: corridor.directionId,
-      stopCodes: corridor.stopCodes,
-      stopNames: corridor.stopNames,
-      corridorIncident: corridor,
-      requests: matchingRequests,
-      representativeRequest: matchingRequests[0] ?? null,
-      firstDetectedAt: corridor.firstDetectedAt,
-      latestDetectedAt: corridor.latestDetectedAt,
-      gapSeconds: corridor.gapSeconds,
-      isLive: !corridor.historical,
-      status: corridorDiagnosisStatus(matchingRequests),
-    })
-  }
-
-  // 2. Remaining requests (historical or non-live sweeps)
-  const remaining = requests.filter(r => !matchedRequestIds.has(r.requestId))
-  const timeBuckets = new Map<string, PlanningDiagnosisRequest[]>()
-  for (const req of remaining) {
-    const service = req.serviceId ?? 'unknown'
-    const direction = req.directionId ?? 1
-    const timeMs = Date.parse(req.createdAt)
-    const bucketTime = Number.isFinite(timeMs) ? Math.floor(timeMs / (5 * 60 * 1000)) : 0
-    const key = `${service}:${direction}:${bucketTime}`
-    const bucket = timeBuckets.get(key) ?? []
-    bucket.push(req)
-    timeBuckets.set(key, bucket)
-  }
-
-  for (const bucket of timeBuckets.values()) {
-    const first = bucket[0]
-    const service = first.serviceId ?? 'unknown'
-    const direction = first.directionId
-    const stopCodes = [...new Set(bucket.flatMap(r => r.stopCode ? [r.stopCode] : []))]
-    const route = routes.find(r => r.serviceId === service && (direction === null || r.directionId === direction))
-    const stopNames = stopCodes.map(code => route?.stops.find((s: RouteStop) => s.stopCode === code)?.description || `Stop ${code}`)
-
-    const id = bucket.length === 1 ? bucket[0].requestId : bucket.map(r => r.eventId).sort().join(':') || bucket[0].requestId
-
-    groups.push({
-      id,
-      serviceId: service,
-      directionId: direction,
-      stopCodes,
-      stopNames,
-      corridorIncident: null,
-      requests: bucket,
-      representativeRequest: first,
-      firstDetectedAt: first.createdAt,
-      latestDetectedAt: bucket.at(-1)!.createdAt,
-      gapSeconds: null,
-      isLive: false,
-      status: corridorDiagnosisStatus(bucket),
-    })
-  }
-
-  return groups.sort((a, b) => {
-    if (a.isLive !== b.isLive) return a.isLive ? -1 : 1
-    return Date.parse(b.latestDetectedAt) - Date.parse(a.latestDetectedAt)
-  })
-}
+type CorridorDiagnosisGroup = PlanningCorridorGroup<PositionedIncident>
 
 export function ControllerPlanning({
   recommendations,
@@ -514,6 +421,7 @@ export function ControllerPlanning({
   nowMs = 0,
   gapToleranceSeconds = 30,
   trafficIncidents = [],
+  simulationHazards = [],
   onPendingChange,
   onRefresh,
   onSaved,
@@ -532,6 +440,7 @@ export function ControllerPlanning({
   nowMs?: number
   gapToleranceSeconds?: number
   trafficIncidents?: TrafficIncident[]
+  simulationHazards?: MapHazard[]
   onRefresh: (reason?: 'mutation') => void
   onSaved: () => void
   onPendingChange: (pending: boolean) => void
@@ -635,6 +544,10 @@ export function ControllerPlanning({
   // Locate matched corridor from deep-link parameters
   const matchedCorridor = useMemo(() => {
     if (!allCorridorGroups.length) return null
+    if (requestedRequestId) {
+      const match = allCorridorGroups.find(g => g.requests.some(r => r.requestId === requestedRequestId))
+      if (match) return match
+    }
     if (requestedIncident) {
       const incidentIds = new Set(requestedIncident.split(':').filter(Boolean))
       const match = allCorridorGroups.find(g =>
@@ -642,10 +555,6 @@ export function ControllerPlanning({
         g.requests.some(r => incidentIds.has(r.eventId)) ||
         g.corridorIncident?.alerts.some(a => incidentIds.has(a.eventId))
       )
-      if (match) return match
-    }
-    if (requestedRequestId) {
-      const match = allCorridorGroups.find(g => g.requests.some(r => r.requestId === requestedRequestId))
       if (match) return match
     }
     if (requestedEventId) {
@@ -664,85 +573,7 @@ export function ControllerPlanning({
     return null
   }, [allCorridorGroups, requestedIncident, requestedRequestId, requestedEventId, requestedService, requestedStop])
 
-  const scopeFilter: 'active' | 'today' | 'all' = useMemo(() => {
-    if (explicitScope) return explicitScope
-    // Simulation requests already belong to the selected run. Keep unfinished
-    // work visible even when its replay timestamps predate today.
-    if (mode === 'DEMO') return 'all'
-    // Smart default on deep link: if user linked to an incident that has already cleared on road, default to 'today'
-    if (matchedCorridor && !matchedCorridor.isLive) return 'today'
-    return 'active'
-  }, [explicitScope, matchedCorridor, mode])
-
-  // Filter corridors by scope
-  const filteredCorridors = useMemo(() => {
-    return allCorridorGroups.filter(group => {
-      if (scopeFilter === 'all') return true
-      if (scopeFilter === 'active') return group.isLive
-      if (scopeFilter === 'today') return isSgtToday(group.latestDetectedAt, nowMs)
-      return true
-    })
-  }, [allCorridorGroups, scopeFilter, nowMs])
-
-  const serviceFilteredCorridors = useMemo(() => {
-    return filteredCorridors.filter(g => !filter.trim() || g.serviceId.includes(filter.trim()))
-  }, [filteredCorridors, filter])
-
-  const visibleCorridors = useMemo(() => {
-    if (matchedCorridor) {
-      const scopeMatches =
-        scopeFilter === 'all' ||
-        (scopeFilter === 'active' && matchedCorridor.isLive) ||
-        (scopeFilter === 'today' && isSgtToday(matchedCorridor.latestDetectedAt, nowMs))
-      if (scopeMatches && !serviceFilteredCorridors.some(g => g.id === matchedCorridor.id)) {
-        return [matchedCorridor, ...serviceFilteredCorridors]
-      }
-    }
-    return serviceFilteredCorridors
-  }, [matchedCorridor, scopeFilter, serviceFilteredCorridors, nowMs])
-
-  // Accurate counter metrics
-  const activeCount = useMemo(() => {
-    const corridorCount = allCorridorGroups.filter(g => g.isLive && (!filter.trim() || g.serviceId.includes(filter.trim()))).length
-    const recommendationCount = recommendationItems.filter(item => {
-      const matchFilter = !filter.trim() || item.serviceId.includes(filter.trim())
-      return matchFilter && detectedAlerts.some(a => a.serviceId === item.serviceId && a.stopCode === item.monitoredStopCode)
-    }).length
-    return corridorCount + recommendationCount
-  }, [allCorridorGroups, recommendationItems, filter, detectedAlerts])
-
-  const todayCount = useMemo(() => {
-    const corridorCount = allCorridorGroups.filter(g => isSgtToday(g.latestDetectedAt, nowMs) && (!filter.trim() || g.serviceId.includes(filter.trim()))).length
-    const recommendationCount = recommendationItems.filter(item => {
-      const matchFilter = !filter.trim() || item.serviceId.includes(filter.trim())
-      return matchFilter && isSgtToday(item.detectedAt, nowMs)
-    }).length
-    return corridorCount + recommendationCount
-  }, [allCorridorGroups, recommendationItems, filter, nowMs])
-
-  const allCount = useMemo(() => {
-    const corridorCount = allCorridorGroups.filter(g => !filter.trim() || g.serviceId.includes(filter.trim())).length
-    const recommendationCount = recommendationItems.filter(item => !filter.trim() || item.serviceId.includes(filter.trim())).length
-    return corridorCount + recommendationCount
-  }, [allCorridorGroups, recommendationItems, filter])
-
-  const outdatedCount = useMemo(() => {
-    const candidateGroups = allCorridorGroups.filter(g => !filter.trim() || g.serviceId.includes(filter.trim()))
-    const candidateRecs = recommendationItems.filter(item => !filter.trim() || item.serviceId.includes(filter.trim()))
-    if (scopeFilter === 'active') {
-      const corridorOutdated = candidateGroups.filter(g => !g.isLive).length
-      const recOutdated = candidateRecs.filter(item => !detectedAlerts.some(a => a.serviceId === item.serviceId && a.stopCode === item.monitoredStopCode)).length
-      return corridorOutdated + recOutdated
-    }
-    if (scopeFilter === 'today') {
-      const corridorOutdated = candidateGroups.filter(g => !isSgtToday(g.latestDetectedAt, nowMs)).length
-      const recOutdated = candidateRecs.filter(item => !isSgtToday(item.detectedAt, nowMs)).length
-      return corridorOutdated + recOutdated
-    }
-    return 0
-  }, [allCorridorGroups, recommendationItems, filter, scopeFilter, nowMs, detectedAlerts])
-
-  // Recommendations matching and filtering
+  // Locate a recommendation linked from another controller page
   const matchedRecommendation = useMemo(() => {
     if (recommendationError || !recommendationScopeMatches) return null
     if (requestedId) {
@@ -757,29 +588,41 @@ export function ControllerPlanning({
     return null
   }, [recommendationError, recommendationScopeMatches, requestedId, incidentEventIds, requestedService, requestedStop, recommendationItems])
 
-  const visibleRecommendations = useMemo(() => {
-    if (recommendationError || !recommendationScopeMatches) return []
-    return recommendationItems.filter(item => {
-      if (scopeFilter === 'all') return true
-      if (scopeFilter === 'active') return detectedAlerts.some(a => a.serviceId === item.serviceId && a.stopCode === item.monitoredStopCode)
-      if (scopeFilter === 'today') return isSgtToday(item.detectedAt, nowMs)
-      return true
-    })
-  }, [recommendationError, recommendationScopeMatches, recommendationItems, scopeFilter, detectedAlerts, nowMs])
-
-  const visible = visibleRecommendations.filter(item => item.serviceId.includes(filter.trim()))
-  const visibleWithRetained = useMemo(() => {
-    if (matchedRecommendation) {
-      const scopeMatches =
-        scopeFilter === 'all' ||
-        (scopeFilter === 'active' && detectedAlerts.some(a => a.serviceId === matchedRecommendation.serviceId && a.stopCode === matchedRecommendation.monitoredStopCode)) ||
-        (scopeFilter === 'today' && isSgtToday(matchedRecommendation.detectedAt, nowMs))
-      if (scopeMatches && !visible.some(item => item.recommendationId === matchedRecommendation.recommendationId)) {
-        return [matchedRecommendation, ...visible]
+  const scopeFilter: 'active' | 'today' | 'all' = useMemo(() => {
+    if (explicitScope) return explicitScope
+    // A simulation's queue already belongs to the selected run.
+    if (mode === 'DEMO') return 'all'
+    if (matchedRecommendation && (requestedId || !matchedCorridor)) {
+      if (!isActiveRecommendation(matchedRecommendation, detectedAlerts)) {
+        return isSgtToday(matchedRecommendation.detectedAt, nowMs) ? 'today' : 'all'
       }
+    } else if (matchedCorridor && !matchedCorridor.isLive) {
+      return isSgtToday(matchedCorridor.latestDetectedAt, nowMs) ? 'today' : 'all'
     }
-    return visible
-  }, [matchedRecommendation, scopeFilter, detectedAlerts, nowMs, visible])
+    return 'active'
+  }, [explicitScope, mode, matchedRecommendation, requestedId, matchedCorridor, detectedAlerts, nowMs])
+
+  const serviceFilter = filter.trim()
+  const scopedQueue = useMemo(() => {
+    const corridors = allCorridorGroups.filter(group => group.serviceId.includes(serviceFilter))
+    const recommendations = recommendationItems.filter(item => item.serviceId.includes(serviceFilter))
+    return {
+      active: {
+        corridors: corridors.filter(group => group.isLive),
+        recommendations: recommendations.filter(item => isActiveRecommendation(item, detectedAlerts)),
+      },
+      today: {
+        corridors: corridors.filter(group => isSgtToday(group.latestDetectedAt, nowMs)),
+        recommendations: recommendations.filter(item => isSgtToday(item.detectedAt, nowMs)),
+      },
+      all: { corridors, recommendations },
+    }
+  }, [allCorridorGroups, recommendationItems, serviceFilter, detectedAlerts, nowMs])
+  const { corridors: visibleCorridors, recommendations: visibleRecommendations } = scopedQueue[scopeFilter]
+  const activeCount = scopedQueue.active.corridors.length + scopedQueue.active.recommendations.length
+  const todayCount = scopedQueue.today.corridors.length + scopedQueue.today.recommendations.length
+  const allCount = scopedQueue.all.corridors.length + scopedQueue.all.recommendations.length
+  const outdatedCount = allCount - visibleCorridors.length - visibleRecommendations.length
 
   const scopeIdentity = `${mode}:${demoRunId ?? 'none'}`
   const { error: recommendationLoadError, hasMore: recommendationHasMore, isLoading: recommendationIsLoading,
@@ -790,34 +633,33 @@ export function ControllerPlanning({
   const editNeedsRevalidation = !!editingInScope && !editingItem && (!!modeError || recommendations.isLoading || recommendations.isLoadingMore ||
     recommendationHasMore || recommendationLoadError !== null)
 
+  const preferredCorridor = visibleCorridors.find(group => group.id === selectedCorridorId)
+    ?? visibleCorridors.find(group => group.id === matchedCorridor?.id)
+  const preferredRecommendation = visibleRecommendations.find(item => item.recommendationId === matchedRecommendation?.recommendationId)
   const isRequestSelection = Boolean(
-    requestedRequestId ||
-    (!requestedId && matchedCorridor) ||
-    (!requestedId && !matchedRecommendation && visibleCorridors.length > 0)
+    preferredCorridor && (requestedRequestId || !requestedId) ||
+    !preferredRecommendation && visibleCorridors.length > 0
   )
 
   const selected = editingInScope && !editingItem && (editNeedsRevalidation || editingRecommendation?.pending) ? editingInScope.recommendation
-    : (isRequestSelection ? null : (matchedRecommendation ?? visibleWithRetained[0] ?? recommendationItems[0] ?? null))
+    : isRequestSelection ? null : preferredRecommendation ?? visibleRecommendations[0] ?? null
   const selectedIdentity = selected ? `${scopeIdentity}:${selected.recommendationId}` : null
-
-  const selectedCorridor = useMemo(() => {
-    if (!isRequestSelection) return null
-    if (selectedCorridorId) {
-      return visibleCorridors.find(g => g.id === selectedCorridorId) ?? null
-    }
-    return matchedCorridor ?? visibleCorridors[0] ?? null
-  }, [isRequestSelection, selectedCorridorId, visibleCorridors, matchedCorridor])
+  const selectedCorridor = isRequestSelection ? preferredCorridor ?? visibleCorridors[0] ?? null : null
 
   const selectedRequest = useMemo(() => {
     if (!selectedCorridor) return null
     if (requestedRequestId) {
       return selectedCorridor.requests.find(r => r.requestId === requestedRequestId) ?? selectedCorridor.representativeRequest
     }
-    if (requestedStop) {
+    if (requestedEventId && !requestedIncident) {
+      const linkedRequest = selectedCorridor.requests.find(r => r.eventId === requestedEventId)
+      if (linkedRequest) return linkedRequest
+    }
+    if (requestedStop && !requestedIncident) {
       return selectedCorridor.requests.find(r => r.stopCode === requestedStop) ?? selectedCorridor.representativeRequest
     }
     return selectedCorridor.representativeRequest ?? selectedCorridor.requests[0] ?? null
-  }, [selectedCorridor, requestedRequestId, requestedStop])
+  }, [selectedCorridor, requestedRequestId, requestedEventId, requestedIncident, requestedStop])
 
   const editorUnavailable = !!editingInScope && (!!modeError || recommendationLoadError !== null)
   const editorStale = editingRecommendation !== null && (editingRecommendation.scopeIdentity !== scopeIdentity ||
@@ -887,13 +729,8 @@ export function ControllerPlanning({
   function handleScopeFilter(newScope: 'active' | 'today' | 'all') {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
-      if (newScope === 'active') {
-        next.delete('time')
-        next.delete('status')
-      } else {
-        next.set('time', newScope)
-        next.delete('status')
-      }
+      next.set('time', newScope)
+      next.delete('status')
       return next
     })
   }
@@ -1032,12 +869,12 @@ export function ControllerPlanning({
               </p>
             )}
             <p className="text-sm">{group.status === 'COMPLETED'
-              ? 'Diagnosis generated; keeping this corridor open for review.'
+              ? 'Diagnosis generated.'
               : group.status === 'PROCESSING' ? 'Diagnosis is being generated.'
               : group.status === 'QUEUED' ? 'Diagnosis is queued.'
               : group.status === 'FAILED' ? 'Diagnosis needs to be retried.' : 'Diagnosis has not been generated yet.'}</p>
           </button>)}
-          {visible.map(item => <button type="button" role="option" aria-selected={selected?.recommendationId === item.recommendationId} key={item.recommendationId} onClick={() => select(item.recommendationId)}
+          {visibleRecommendations.map(item => <button type="button" role="option" aria-selected={selected?.recommendationId === item.recommendationId} key={item.recommendationId} onClick={() => select(item.recommendationId)}
             className="min-h-28 w-full space-y-2 px-4 py-4 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring aria-selected:bg-muted">
             <div className="flex items-start justify-between gap-3"><span className="font-medium">Service {item.serviceId} · Direction {item.directionId}</span><span className="shrink-0 text-xs text-muted-foreground">{timestamp(item.detectedAt)}</span></div>
             <p className="text-xs text-muted-foreground">Stop {item.monitoredStopCode}</p>
@@ -1049,7 +886,7 @@ export function ControllerPlanning({
               : affectedBuses(item).length > 1 ? 'Refresh for current suggestions'
                 : `${item.mitigationType.replaceAll('_', ' ')} · Target: ${item.targetBusReference}`}</p>
           </button>)}
-          {!visibleWithRetained.length && !visibleCorridors.length && (
+          {!visibleRecommendations.length && !visibleCorridors.length && (
             <div className="space-y-2 p-6 text-center text-sm text-muted-foreground">
               <p>{filter.trim() ? 'No matching bus service.' : scopeFilter === 'active' ? 'No active bunching detected on routes right now.' : 'No bunching requests in this time window.'}</p>
               {todayCount > 0 && scopeFilter === 'active' && (
@@ -1072,7 +909,7 @@ export function ControllerPlanning({
       </Card>
 
       {!selectedRequest && detailRecommendation && detailIdentity && <RecommendationDetail key={detailIdentity} selected={detailRecommendation} identity={detailIdentity}
-        scopeIdentity={scopeIdentity} token={token} detectedAlerts={detectedAlerts} routes={routes} positions={positions} trafficIncidents={trafficIncidents} isCurrent={selectionIsCurrent} validationFailed={editorUnavailable}
+        scopeIdentity={scopeIdentity} token={token} detectedAlerts={detectedAlerts} routes={routes} positions={positions} trafficIncidents={trafficIncidents} simulationHazards={simulationHazards} isCurrent={selectionIsCurrent} validationFailed={editorUnavailable}
         retryCurrentCheck={modeError ? onRefresh : recommendations.reload}
         onSaved={onSaved} onMessage={setMessage} onEditorChange={setEditingRecommendation}
         onRefreshed={item => {
@@ -1084,6 +921,7 @@ export function ControllerPlanning({
         corridor={selectedCorridor}
         routes={routes} positions={positions} detectedAlerts={detectedAlerts}
         trafficIncidents={trafficIncidents}
+        simulationHazards={simulationHazards}
         detectedBusReferences={detectedBusReferences(selectedRequest, detectedAlerts, selectedCorridor)}
         generating={triggeringRequestId === selectedRequest.requestId} suggesting={suggestingRequestId === selectedRequest.requestId}
         token={token} onSuggestionPending={pending => setSuggestingRequestId(pending ? selectedRequest.requestId : null)}
@@ -1106,6 +944,11 @@ export function ControllerPlanning({
           <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
             {selectedCorridor.stopNames.join(' → ')}
           </div>
+          {mode === 'DEMO' && <PlanningCorridorMap routes={routes} positions={positions}
+            serviceId={selectedCorridor.serviceId} directionId={selectedCorridor.directionId}
+            monitoredStopCode={selectedCorridor.stopCodes[0] ?? ''} corridorStopCodes={selectedCorridor.stopCodes}
+            corridorIncident={selectedCorridor.corridorIncident} alert={selectedCorridor.corridorIncident?.alerts[0]}
+            trafficIncidents={trafficIncidents} simulationHazards={simulationHazards} simulation />}
           <p className="text-sm">Awaiting diagnosis request dispatch from disruption outbox.</p>
         </CardContent></Card>
       )}
@@ -1154,9 +997,9 @@ function detectedBusReferences(request: PlanningDiagnosisRequest | null, alerts:
   return []
 }
 
-function DiagnosisRequestDetail({ request, corridor, routes, positions, detectedAlerts, detectedBusReferences, generating, suggesting, token, trafficIncidents = [], onSuggestionPending, onSaved, onGenerate }: {
+function DiagnosisRequestDetail({ request, corridor, routes, positions, detectedAlerts, detectedBusReferences, generating, suggesting, token, trafficIncidents, simulationHazards, onSuggestionPending, onSaved, onGenerate }: {
   request: PlanningDiagnosisRequest; corridor?: CorridorDiagnosisGroup | null; routes: RouteDirection[]; positions: RoutePositions[]; detectedAlerts: BunchingAlert[]; detectedBusReferences: string[]; generating: boolean; suggesting: boolean; token: string
-  trafficIncidents?: TrafficIncident[]; onSuggestionPending: (pending: boolean) => void; onSaved: () => void; onGenerate: () => void
+  trafficIncidents: TrafficIncident[]; simulationHazards: MapHazard[]; onSuggestionPending: (pending: boolean) => void; onSaved: () => void; onGenerate: () => void
 }) {
   const retry = request.status.startsWith('FAILED')
   const queued = isDiagnosisQueued(request)
@@ -1264,9 +1107,11 @@ function DiagnosisRequestDetail({ request, corridor, routes, positions, detected
       corridorStopCodes={corridor?.stopCodes}
       busReferences={detectedBusReferences}
       corridorIncident={corridor?.corridorIncident}
+      simulation={request.classification === 'SIMULATION'}
       alert={corridor?.corridorIncident?.alerts[0] ?? detectedAlerts.find(a => a.eventId === request.eventId || (a.serviceId === request.serviceId && a.stopCode === request.stopCode))}
       evidenceDetails={request.evidenceDetails}
       trafficIncidents={trafficIncidents}
+      simulationHazards={simulationHazards}
       isHistorical={corridor ? !corridor.isLive : false}
     />
 
@@ -1281,7 +1126,7 @@ function DiagnosisRequestDetail({ request, corridor, routes, positions, detected
       {request.failureCode && <p className="mt-2 text-sm text-destructive">Last attempt: {request.failureCode}</p>}</div>
     {completed && <div className="rounded-lg border p-4 space-y-3">
       <div>
-        <h3 className="text-sm font-medium">AI diagnosis</h3>
+        <h3 className="text-sm font-medium">Diagnosis</h3>
         {request.likelyCause
           ? <p className="mt-2 text-sm">{request.likelyCause}</p>
           : <p className="mt-2 text-sm text-muted-foreground">No supported contributing cause was identified from the available evidence.</p>}
@@ -1289,7 +1134,7 @@ function DiagnosisRequestDetail({ request, corridor, routes, positions, detected
       </div>
       {!!request.evidenceDetails?.length && (
         <div className="border-t pt-3">
-          <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Supporting incident evidence</h4>
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Incident evidence</h4>
           <RecommendationEvidenceList items={request.evidenceDetails} />
         </div>
       )}
@@ -1304,7 +1149,7 @@ function DiagnosisRequestDetail({ request, corridor, routes, positions, detected
       <Dialog open={editorOpen} onOpenChange={openEditor}>
         <DialogTrigger asChild><Button variant="outline" disabled={suggesting || !detectedBusReferences.length}>Suggest actions for detected buses</Button></DialogTrigger>
         <DialogContent className="sm:max-w-3xl" onOpenAutoFocus={event => { event.preventDefault(); firstInstruction.current?.focus() }}>
-          <DialogHeader><DialogTitle>Suggest mitigation actions</DialogTitle><DialogDescription>Record an action for each bus detected in this bunching incident. This is available before the AI diagnosis and does not dispatch an instruction.</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>Suggest mitigation actions</DialogTitle><DialogDescription>Record a proposed action for each bus detected in this bunching incident before diagnosis.</DialogDescription></DialogHeader>
           {!detectedBusReferences.length && <p role="alert" className="text-sm text-destructive">Detected bus references are unavailable for this incident.</p>}
           {message && <p role="alert" className="rounded-lg border p-3 text-sm">{message}</p>}
           <form className="space-y-4" noValidate onSubmit={event => { event.preventDefault(); void saveSuggestion() }}>
@@ -1325,7 +1170,7 @@ function DiagnosisRequestDetail({ request, corridor, routes, positions, detected
   </CardContent></Card>
 }
 
-function RecommendationDetail({ selected, identity, scopeIdentity, token, detectedAlerts, routes, positions, isCurrent, validationFailed, retryCurrentCheck, onSaved, onMessage, onEditorChange, onRefreshed, trafficIncidents = [] }: {
+function RecommendationDetail({ selected, identity, scopeIdentity, token, detectedAlerts, routes, positions, isCurrent, validationFailed, retryCurrentCheck, onSaved, onMessage, onEditorChange, onRefreshed, trafficIncidents, simulationHazards }: {
   selected: PendingRecommendation; identity: string; scopeIdentity: string; token: string
   detectedAlerts: BunchingAlert[]
   routes: RouteDirection[]
@@ -1333,7 +1178,8 @@ function RecommendationDetail({ selected, identity, scopeIdentity, token, detect
   isCurrent: boolean; validationFailed: boolean; retryCurrentCheck: () => void
   onSaved: () => void; onMessage: (message: string) => void; onEditorChange: Dispatch<SetStateAction<EditingRecommendation | null>>
   onRefreshed: (item: PendingRecommendation) => void
-  trafficIncidents?: TrafficIncident[]
+  trafficIncidents: TrafficIncident[]
+  simulationHazards: MapHazard[]
 }) {
   const [pending, setPending] = useState(false)
   const [message, setMessage] = useState('')
@@ -1346,7 +1192,14 @@ function RecommendationDetail({ selected, identity, scopeIdentity, token, detect
   const predictionsExpired = predictionDeadline !== null && predictionDeadline <= predictionCheckedAt
   const predictionsNeedReview = grouped && selected.predictionValidUntil === null
   const canReview = !predictionsExpired && !predictionsNeedReview
-  const canApprove = !grouped || affectedBuses(selected).every(bus => selected.suggestedOutcomes?.some(item => item.busReference === bus))
+  const unavailableHoldBuses = busesWithDifferentNextStop(selected, routes, positions)
+  const staleHold = affectedBuses(selected).some(bus => unavailableHoldBuses.has(bus) &&
+    (hasBusSuggestions ? selected.suggestedOutcomes?.some(item => item.busReference === bus && item.mitigationType === 'HOLD')
+      : !grouped && selected.mitigationType === 'HOLD'))
+  const hasProposedInstruction = hasBusSuggestions
+    ? Boolean(selected.suggestedOutcomes?.some(outcome => outcome.mitigationType))
+    : !grouped
+  const canApprove = !staleHold && (!grouped || affectedBuses(selected).every(bus => selected.suggestedOutcomes?.some(item => item.busReference === bus)))
   useEffect(() => {
     if (predictionDeadline === null) return
     const timer = window.setTimeout(() => setPredictionCheckedAt(Date.now()), Math.max(0, predictionDeadline - Date.now()))
@@ -1448,12 +1301,17 @@ function RecommendationDetail({ selected, identity, scopeIdentity, token, detect
   }
 
   async function decide(action: Decision['action']) {
-    if (submitting.current || !isCurrent || !canReview) return
+    if (submitting.current || !isCurrent || !canReview || (action === 'APPROVED' && !canApprove)) return
     if (predictionDeadline !== null && Date.now() >= predictionDeadline) {
       setPredictionCheckedAt(Date.now())
       return
     }
     if (action === 'REJECTED') {
+      const invalidHold = instructions.find(item => item.action === 'HOLD' && unavailableHoldBuses.has(item.busReference))
+      if (invalidHold) {
+        setMessage(`The control stop is no longer the next stop for ${invalidHold.busReference}. Choose another outcome for this bus.`)
+        return
+      }
       const unassignedWithAction = instructions.find(item => !isBusCaptainAssigned(item.busReference, selected) && item.action !== 'NONE')
       if (unassignedWithAction) {
         setMessage(`${unassignedWithAction.busReference} has no captain assigned to receive instructions. Select No instruction for this bus.`)
@@ -1485,8 +1343,9 @@ function RecommendationDetail({ selected, identity, scopeIdentity, token, detect
         },
       })
       if (!controller.signal.aborted) {
-        onMessage(action === 'APPROVED' ? grouped ? 'Suggested outcomes approved and instructions issued to the assigned captains.'
-            : 'Recommendation approved and instruction issued to the assigned captain.'
+        onMessage(action === 'APPROVED' ? !hasProposedInstruction ? 'No-instruction outcomes saved for all affected buses.'
+            : grouped ? 'Suggested outcomes approved and instructions issued to the assigned captains.'
+              : 'Recommendation approved and instruction issued to the assigned captain.'
           : instructions.some(item => item.action !== 'NONE') ? 'Bus outcomes saved and selected instructions issued.' : 'No-instruction outcomes saved for all affected buses.')
         closeEditor(true)
       }
@@ -1522,8 +1381,9 @@ function RecommendationDetail({ selected, identity, scopeIdentity, token, detect
                 ? 'Predictions expired. Refresh bus group to review again.'
                 : 'Refresh bus group to verify predictions before approving.'}</p>
             : selected.predictionValidUntil && <p className="w-full text-right text-xs text-muted-foreground">Predictions valid until {timestamp(selected.predictionValidUntil)}</p>}
-          {grouped && canReview && <p className="w-full text-right text-xs text-muted-foreground">{canApprove
-            ? 'Approving issues the suggested outcome shown for each bus below.'
+          {staleHold && <p role="status" className="w-full text-right text-sm text-destructive">A bus’s next stop has changed. Refresh the bus group to review current outcomes.</p>}
+          {grouped && canReview && !staleHold && <p className="w-full text-right text-xs text-muted-foreground">{canApprove
+            ? hasProposedInstruction ? 'Approving issues the suggested outcome shown for each bus below.' : 'Approving records the no-instruction outcomes shown below.'
             : 'Review an outcome for every affected bus before saving.'}</p>}
           <Button variant="outline" disabled={pending || !isCurrent} onClick={() => { void refresh() }}>Refresh bus group</Button>
           <Button disabled={pending || !isCurrent || !canReview || !canApprove} onClick={() => { void decide('APPROVED') }}>Approve recommendation</Button>
@@ -1643,13 +1503,15 @@ function RecommendationDetail({ selected, identity, scopeIdentity, token, detect
           positions={positions}
           serviceId={selected.serviceId}
           directionId={selected.directionId}
-          controlStopCode={selected.controlStopCode || selected.monitoredStopCode}
+          controlStopCode={hasProposedInstruction && !staleHold ? selected.controlStopCode : null}
           monitoredStopCode={selected.monitoredStopCode}
-          mitigationType={selected.mitigationType}
+          mitigationType={hasProposedInstruction && !staleHold ? selected.mitigationType : null}
           busReferences={affectedBuses(selected)}
           alert={recommendationAlert(selected, detectedAlerts)}
           evidenceDetails={selected.explanation.evidenceDetails}
           trafficIncidents={trafficIncidents}
+          simulationHazards={simulationHazards}
+          simulation={selected.classification === 'SIMULATION'}
           isHistorical={!detectedAlerts.some(a => a.serviceId === selected.serviceId && a.stopCode === selected.monitoredStopCode)}
         />
 
@@ -1659,7 +1521,10 @@ function RecommendationDetail({ selected, identity, scopeIdentity, token, detect
           </p>}
           <div className="divide-y rounded-lg border">{affectedBuses(selected).map(busReference => {
             const outcome = selected.suggestedOutcomes?.find(item => item.busReference === busReference)
-            const instruction = outcome
+            const hold = outcome ? outcome.mitigationType === 'HOLD' : showsLegacySuggestion && selected.mitigationType === 'HOLD'
+            const instruction = hold && unavailableHoldBuses.has(busReference)
+              ? 'Hold unavailable. The control stop is no longer this bus’s next stop.'
+              : outcome
               ? outcome.mitigationType
                 ? suggestedInstruction(selected, outcome)
                 : `No instruction. ${outcome.reason ?? ''}`
@@ -1673,7 +1538,7 @@ function RecommendationDetail({ selected, identity, scopeIdentity, token, detect
 
         <details className="border-t pt-4"><summary className="cursor-pointer text-sm font-medium">Evidence and limitations</summary>
           <div className="mt-4 space-y-4">
-            {!!selected.explanation.evidenceDetails?.length && <div><h3 className="text-sm font-medium">Supporting incident evidence</h3><RecommendationEvidenceList items={selected.explanation.evidenceDetails} /></div>}
+            {!!selected.explanation.evidenceDetails?.length && <div><h3 className="text-sm font-medium">Incident evidence</h3><RecommendationEvidenceList items={selected.explanation.evidenceDetails} /></div>}
             <div className="grid gap-5 sm:grid-cols-2">{showsLegacySuggestion && <div><h3 className="text-sm font-medium">Trade-offs</h3><ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted-foreground">{selected.explanation.tradeOffs.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}<div><h3 className="text-sm font-medium">Limitations</h3><ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted-foreground">{selected.explanation.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul></div></div>
           </div>
         </details>

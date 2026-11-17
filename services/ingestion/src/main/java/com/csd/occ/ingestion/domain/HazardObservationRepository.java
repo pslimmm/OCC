@@ -9,6 +9,8 @@ import org.springframework.data.jpa.repository.Query;
 
 public interface HazardObservationRepository extends JpaRepository<HazardObservation, UUID> {
     List<HazardObservation> findByPollRunIdOrderById(UUID pollRunId);
+    List<HazardObservation> findByDemoRunIdAndClassificationAndFetchedAtLessThanEqualOrderByFetchedAtDescIdAsc(
+            UUID demoRunId, String classification, Instant at);
     long deleteByDemoRunId(UUID demoRunId);
     @Modifying @Query("delete from HazardObservation h where h.classification = 'OBSERVATION_ONLY' and h.fetchedAt < :cutoff")
     int deleteExpiredLive(Instant cutoff);

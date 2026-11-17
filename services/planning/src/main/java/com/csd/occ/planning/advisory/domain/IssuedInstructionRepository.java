@@ -29,6 +29,9 @@ public interface IssuedInstructionRepository extends JpaRepository<IssuedInstruc
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select i from IssuedInstruction i where i.demoRunId=:runId and i.busId=:busId and i.status in ('ISSUED','ACKNOWLEDGED') order by i.id")
     List<IssuedInstruction> findActiveByDemoRunIdAndBusIdForUpdate(UUID runId, String busId);
+    @Query("select i from IssuedInstruction i where i.demoRunId=:runId and i.busId in :busIds "
+            + "and i.type <> 'BE_CAUTIOUS' and i.status in ('ISSUED','ACKNOWLEDGED')")
+    List<IssuedInstruction> findActiveMovementByBusIds(UUID runId, java.util.Set<String> busIds);
     @Lock(LockModeType.PESSIMISTIC_WRITE) @Query("select i from IssuedInstruction i where i.proposalId=:proposalId order by i.issuedAt asc")
     List<IssuedInstruction> findByProposalIdForUpdate(UUID proposalId);
     @Query("select i from IssuedInstruction i where i.proposalId=:proposalId order by i.issuedAt asc")

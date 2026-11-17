@@ -235,8 +235,35 @@ class BunchingRecommendationPolicyTest {
                 new SuggestedBusOutcome("tail", null, 0, "An adjacent gap needs manual review."));
     }
 
+    @Test
+    void suppressesHoldWhenTheForecastStopIsBehindOrBeyondTheVerifiedNextStop() {
+        var now = Instant.parse("2026-09-27T23:45:02Z");
+        var buses = List.of("lead", "before", "past", "unknown");
+        var group = new AdvisoryContextPort.CurrentBunchingGroup(UUID.randomUUID(), EVENT_ID, "190", "44251", 1,
+                UUID.randomUUID(), now, now.plusSeconds(30), buses, List.of(20L, 20L, 20L),
+                List.of(true, true, true));
+        var progress = new AdvisoryContextPort.Progress("44251", 2, now, 30, List.of(), List.of(),
+                now.plusSeconds(10), now.plusSeconds(30));
+        var fleet = List.of(bus("before", progress, UUID.randomUUID(), 1), bus("past", progress, UUID.randomUUID(), 3),
+                bus("unknown", progress, UUID.randomUUID(), null));
+        var route = new AdvisoryContextPort.Route("190", List.of(new AdvisoryContextPort.Operator("SBST", "BUS",
+                List.of(new AdvisoryContextPort.Direction(1, List.of(new AdvisoryContextPort.Stop("44251", "Stop", 2)))))));
+
+        assertThat(policy.suggestOutcomes(group, fleet, route, 600, now)).containsExactly(
+                new SuggestedBusOutcome("lead", null, 0, "No preceding gap in the reviewed group."),
+                new SuggestedBusOutcome("before", null, 0, "The reviewed control stop is not the bus's verified next stop."),
+                new SuggestedBusOutcome("past", null, 0, "The reviewed control stop is not the bus's verified next stop."),
+                new SuggestedBusOutcome("unknown", null, 0, "The bus's next stop is unavailable."));
+    }
+
     private static AdvisoryContextPort.Bus bus(String id, AdvisoryContextPort.Progress progress, UUID captain) {
-        return new AdvisoryContextPort.Bus(id, id, id, "190", 1, captain, captain == null ? "UNASSIGNED" : "ASSIGNED", progress);
+        return bus(id, progress, captain, progress.stopSequence());
+    }
+
+    private static AdvisoryContextPort.Bus bus(String id, AdvisoryContextPort.Progress progress, UUID captain,
+            Integer nextStopSequence) {
+        return new AdvisoryContextPort.Bus(id, id, id, "190", 1, captain, captain == null ? "UNASSIGNED" : "ASSIGNED",
+                progress, 0, nextStopSequence);
     }
 
     private ConfirmedBunchingEvent confirmedEvent() {

@@ -459,7 +459,8 @@ export function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: n
 
 export type HazardCategory = 'accident' | 'breakdown' | 'roadwork' | 'traffic' | 'flood' | 'rail' | 'other'
 
-export function categorizeHazard(hazard: { incidentType?: string | null; message?: string | null }): HazardCategory {
+export function categorizeHazard(hazard: { category?: HazardCategory; incidentType?: string | null; message?: string | null }): HazardCategory {
+  if (hazard.category) return hazard.category
   const text = `${hazard.incidentType ?? ''} ${hazard.message ?? ''}`.toLowerCase()
   if (text.includes('accident') || text.includes('collision') || text.includes('crash')) return 'accident'
   if (text.includes('breakdown') || text.includes('broken down') || text.includes('stalled')) return 'breakdown'
@@ -538,8 +539,14 @@ export function renderHazardSvg(x: number, y: number, category: HazardCategory) 
 export interface MapHazard {
   id: string
   disruptionId?: string | null
+  demoRunId?: string | null
   latitude: number
   longitude: number
+  serviceId?: string
+  directionId?: number
+  hazardLocation?: string | null
+  affectedStopCode?: string | null
+  affectedStopName?: string | null
   incidentType?: string
   message?: string
   title?: string
@@ -567,7 +574,9 @@ export interface BunchingMapProps {
   hazards?: MapHazard[]
   selectedHazardId?: string | null
   onSelectHazard?: (hazardId: string | null) => void
+  onLocateHazardInList?: (hazardId: string) => void
   focusCoord?: { lat: number; lng: number } | null
+  simulationFleet?: boolean
 }
 
 export function BunchingMap({
@@ -586,7 +595,9 @@ export function BunchingMap({
   hazards = [],
   selectedHazardId,
   onSelectHazard,
+  onLocateHazardInList,
   focusCoord,
+  simulationFleet = false,
 }: BunchingMapProps) {
   const incidentBusKeys = useMemo(() => {
     const keys = new Set<string>()
@@ -761,31 +772,35 @@ export function BunchingMap({
       serviceId,
       directionId,
       order: bus.order,
-      label: `Estimated bus ${bus.order} on service ${serviceId}`,
+      label: `${simulationFleet ? 'Demo bus' : 'Estimated bus'} ${bus.order} on service ${serviceId}`,
     }]
-  }), [filteredBuses, routes, activeGeometries])
+  }), [filteredBuses, routes, activeGeometries, simulationFleet])
+
+  const simulationHazardPoints = useMemo(() =>
+    hazards.filter(hazard => hazard.demoRunId && validCoord(hazard.latitude, hazard.longitude)), [hazards])
 
   const corridorFocusPoints = useMemo(() => {
     if (isAllCorridors) {
       const pts: Array<{ latitude: number; longitude: number }> = [
         ...allStops.map(s => ({ latitude: s.latitude, longitude: s.longitude })),
         ...busMarkers.map(b => ({ latitude: b.latitude, longitude: b.longitude })),
+        ...simulationHazardPoints,
       ]
       return pts
     }
     if (allStops.length > 0) {
-      return allStops.map(s => ({ latitude: s.latitude, longitude: s.longitude }))
+      return [...allStops, ...simulationHazardPoints]
     }
-    return busMarkers.map(b => ({ latitude: b.latitude, longitude: b.longitude }))
-  }, [allStops, busMarkers, isAllCorridors])
+    return [...busMarkers, ...simulationHazardPoints]
+  }, [allStops, busMarkers, isAllCorridors, simulationHazardPoints])
 
   const selectedFocusPoints = useMemo(() => {
     if (!selectedIncident) return []
     const stopPts = allStops.filter(s => selectedStopCodes.has(s.stopCode)).map(s => ({ latitude: s.latitude, longitude: s.longitude }))
-    const busPts = busMarkers.filter(b => selectedBuses.has(`${b.serviceId}-${b.order}`)).map(b => ({ latitude: b.latitude, longitude: b.longitude }))
-    const combined = [...stopPts, ...busPts]
-    return combined.length > 0 ? combined : stopPts
-  }, [selectedIncident, allStops, selectedStopCodes, busMarkers, selectedBuses])
+    const busPts = busMarkers.filter(b => simulationFleet || selectedBuses.has(`${b.serviceId}-${b.order}`))
+      .map(b => ({ latitude: b.latitude, longitude: b.longitude }))
+    return [...stopPts, ...busPts, ...simulationHazardPoints]
+  }, [selectedIncident, allStops, selectedStopCodes, busMarkers, selectedBuses, simulationFleet, simulationHazardPoints])
 
   const fitKey = useMemo(() => {
     const rKey = routes.map(r => `${r.serviceId}-${r.directionId}`).sort().join(',')
@@ -803,26 +818,21 @@ export function BunchingMap({
     return computeCorridorFit(selectedFocusPoints, width, height, 60)
   }, [selectedFocusPoints, width, height])
 
-  const [manualView, setManualView] = useState<{ center: { lat: number; lng: number }; zoom: number } | null>(null)
+  const [manualView, setManualView] = useState<{ center: { lat: number; lng: number }; zoom: number } | null>(
+    () => focusCoord && validCoord(focusCoord.lat, focusCoord.lng) ? { center: focusCoord, zoom: 15 } : null
+  )
   const [prevFitKey, setPrevFitKey] = useState(fitKey)
   const [prevSelectedId, setPrevSelectedId] = useState<string | null | undefined>(selectedIncident?.id)
   const [prevFocusCoord, setPrevFocusCoord] = useState(focusCoord)
 
   if (prevFitKey !== fitKey) {
     setPrevFitKey(fitKey)
-    setManualView(null)
+    if (!focusCoord) setManualView(null)
   }
   if (prevSelectedId !== selectedIncident?.id) {
     setPrevSelectedId(selectedIncident?.id)
-    setManualView(null)
+    if (!focusCoord) setManualView(null)
   }
-  if (prevFocusCoord !== focusCoord) {
-    setPrevFocusCoord(focusCoord)
-    if (focusCoord && validCoord(focusCoord.lat, focusCoord.lng)) {
-      setManualView({ center: focusCoord, zoom: 15 })
-    }
-  }
-
   const [localSelectedHazardId, setLocalSelectedHazardId] = useState<string | null>(null)
   const activeHazardId = selectedHazardId !== undefined ? selectedHazardId : localSelectedHazardId
 
@@ -845,6 +855,18 @@ export function BunchingMap({
   const [activeHazardTypes, setActiveHazardTypes] = useState<Set<HazardCategory>>(
     () => new Set(['breakdown', 'roadwork', 'accident', 'traffic', 'flood', 'rail', 'other'])
   )
+
+  if (prevFocusCoord !== focusCoord) {
+    setPrevFocusCoord(focusCoord)
+    if (focusCoord && validCoord(focusCoord.lat, focusCoord.lng)) {
+      setManualView({ center: focusCoord, zoom: 15 })
+      if (activeSelectedHazard) {
+        const category = categorizeHazard(activeSelectedHazard)
+        if (!showHazards) setShowHazards(true)
+        if (!activeHazardTypes.has(category)) setActiveHazardTypes(new Set([...activeHazardTypes, category]))
+      }
+    }
+  }
 
   const toggleHazardType = (cat: HazardCategory) => {
     setActiveHazardTypes(prev => {
@@ -1008,7 +1030,7 @@ export function BunchingMap({
     }
   }
 
-  if (!isAllCorridors && allStops.length < 2) {
+  if (!isAllCorridors && allStops.length < 2 && !activeSelectedHazard) {
     return <p className="rounded-lg border p-4 text-sm text-muted-foreground">Stop coordinates are unavailable for this detection.</p>
   }
 
@@ -1122,12 +1144,16 @@ export function BunchingMap({
     : new Map<string, MapOverlayRect>()
 
   return (
-    <div id="corridor-map" className="relative overflow-hidden rounded-lg border bg-muted/10">
+    <div id="corridor-map" className="relative scroll-mt-20 overflow-hidden rounded-lg border bg-muted/10">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
         <div className="space-y-0.5">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-medium">{title ?? 'Affected corridor map'}</h3>
-            {selectedIncident && (
+            <h3 className="font-medium">{activeSelectedHazard?.title || title || 'Affected corridor map'}</h3>
+            {activeSelectedHazard?.serviceId ? (
+              <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-semibold text-primary">
+                Service {activeSelectedHazard.serviceId} · Direction {activeSelectedHazard.directionId}
+              </span>
+            ) : !activeSelectedHazard && selectedIncident && (
               <span className={cn(
                 "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold",
                 selectedIncident.historical
@@ -1143,7 +1169,14 @@ export function BunchingMap({
             )}
           </div>
           <p className="text-xs text-muted-foreground">
-            {subtitle !== undefined
+            {activeSelectedHazard ? <>
+              Highlighted pin shows the hazard location{activeSelectedHazard.hazardLocation && <> at <strong>{activeSelectedHazard.hazardLocation}</strong></>}.
+              {(activeSelectedHazard.affectedStopCode || activeSelectedHazard.affectedStopName) && <>
+                {' '}Affected stop <strong>{activeSelectedHazard.affectedStopName
+                  ? `${activeSelectedHazard.affectedStopName}${activeSelectedHazard.affectedStopCode ? ` (${activeSelectedHazard.affectedStopCode})` : ''}`
+                  : activeSelectedHazard.affectedStopCode}</strong>.
+              </>}
+            </> : subtitle !== undefined
               ? subtitle
               : selectedIncident
                 ? selectedIncident.historical
@@ -1158,8 +1191,18 @@ export function BunchingMap({
                   : 'Stops are sourced from route topology; buses are current position estimates. Click a stop or bus to focus.'}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {onSelectIncident && (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {simulationFleet && (
+            <Button type="button" variant="outline" size="sm" className="h-7 text-xs"
+              disabled={!busMarkers.length}
+              onClick={() => {
+                setShowBuses(true)
+                setManualView(computeCorridorFit(busMarkers, width, height, 60))
+              }}>
+              Fit demo buses
+            </Button>
+          )}
+          {onSelectIncident && !focusCoord && (
             <Button
               type="button"
               variant="outline"
@@ -1201,7 +1244,7 @@ export function BunchingMap({
             title="Toggle fleet buses on map"
           >
             <span className="size-2 rounded-full bg-blue-600" />
-            <span>Buses</span>
+            <span>{simulationFleet ? 'Demo buses' : 'Buses'}</span>
           </button>
           <button
             type="button"
@@ -1267,11 +1310,11 @@ export function BunchingMap({
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-flex items-center justify-center size-3.5 rounded-full bg-sky-700 text-[9px] font-bold text-white shadow-xs">#</span>
-            Estimated bus
+            {simulationFleet ? 'Demo bus' : 'Estimated bus'}
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-flex items-center justify-center min-w-5 h-3.5 px-1 rounded-full bg-amber-700 text-[9px] font-bold text-white shadow-xs">2 · 3</span>
-            Bunched cluster
+            {simulationFleet ? 'Grouped demo bus numbers' : 'Bunched cluster'}
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-flex items-center justify-center size-3.5 rounded bg-blue-600 text-[10px] font-black text-white shadow-xs leading-none">
@@ -1501,7 +1544,7 @@ export function BunchingMap({
           })}
           {projectedHazards.map(hazard => {
             const isSelected = activeHazardId === hazard.id || (hazard.disruptionId && activeHazardId === hazard.disruptionId)
-            const label = `Hazard: ${hazard.incidentType || 'Traffic incident'} - ${hazard.message || 'Reported incident'}${isSelected ? ' (Selected)' : ''}`
+            const label = `Hazard: ${hazard.incidentType || 'Traffic incident'} - ${hazard.title || hazard.message || 'Reported incident'}${isSelected ? ' (Selected)' : ''}`
             return (
               <g
                 key={hazard.id}
@@ -1551,7 +1594,8 @@ export function BunchingMap({
             )
           })}
           {busClusters.map(cluster => {
-            const isDimmed = selectedIncident && !cluster.isSelected
+            const isDimmed = !simulationFleet && selectedIncident && !cluster.isSelected
+            const selectionLabel = simulationFleet ? 'Part of the selected bunching group' : 'Bunched pair for selected incident'
             const isMulti = cluster.buses.length > 1
             const pillW = isMulti ? Math.max(38, cluster.text.length * 8 + 16) : 26
             const pillH = isMulti ? 22 : 26
@@ -1578,7 +1622,7 @@ export function BunchingMap({
                 key={cluster.key}
                 role={cluster.hasIncident && onSelectIncident ? "button" : undefined}
                 tabIndex={cluster.hasIncident && onSelectIncident ? 0 : undefined}
-                aria-label={`${cluster.label}${cluster.isSelected ? ' - Bunched pair for selected incident' : ''}`}
+                aria-label={`${cluster.label}${cluster.isSelected ? ` - ${selectionLabel}` : ''}`}
                 className={cn(
                   "pointer-events-auto transition-opacity duration-300",
                   cluster.hasIncident && onSelectIncident ? "cursor-pointer outline-none focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700" : "cursor-default"
@@ -1593,7 +1637,7 @@ export function BunchingMap({
                   }
                 }}
               >
-                <title>{`${cluster.label}${cluster.isSelected ? ' [Bunched pair for selected incident]' : ''}${cluster.hasIncident && onSelectIncident ? ' - Click to view incident' : ''}`}</title>
+                <title>{`${cluster.label}${cluster.isSelected ? ` [${selectionLabel}]` : ''}${cluster.hasIncident && onSelectIncident ? ' - Click to view incident' : ''}`}</title>
                 {cluster.isSelected && (
                   isMulti ? (
                     <rect
@@ -1681,7 +1725,7 @@ export function BunchingMap({
         </svg>
 
         {activeSelectedHazard && (() => {
-          const activeCategory = activeSelectedHazard.category ?? categorizeHazard(activeSelectedHazard)
+          const activeCategory = categorizeHazard(activeSelectedHazard)
           return (
           <div
             role="region"
@@ -1760,21 +1804,15 @@ export function BunchingMap({
               >
                 Center on map
               </Button>
-              <Button
+              {onLocateHazardInList && <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 className="h-7 text-xs text-primary hover:underline"
-                onClick={() => {
-                  const targetId = activeSelectedHazard.disruptionId || activeSelectedHazard.id
-                  const el = document.getElementById(`hazard-${targetId}`)
-                  if (el) {
-                    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                  }
-                }}
+                onClick={() => onLocateHazardInList(activeSelectedHazard.disruptionId || activeSelectedHazard.id)}
               >
                 Locate in list ↓
-              </Button>
+              </Button>}
             </div>
           </div>
           )
@@ -1829,9 +1867,9 @@ export function BunchingMap({
             : 'No current bus position estimate is linked to this corridor segment (buses have traversed this segment or observation cycle has rolled over).'}
         </p>
       )}
-      {!selectedIncident && !busMarkers.length && (
+      {(simulationFleet || !selectedIncident) && !busMarkers.length && (
         <p className="border-t px-4 py-3 text-xs text-muted-foreground">
-          {isAllCorridors
+          {simulationFleet ? 'Waiting for demo bus positions.' : isAllCorridors
             ? 'No bunched bus positions match this view. Select a corridor above to inspect all active fleet buses.'
             : 'No current bus position estimate is available for this corridor.'}
         </p>
@@ -1937,10 +1975,12 @@ export function ControllerDisruptions({
   pollIntervalSeconds = 60,
   gapToleranceSeconds = 30,
   trafficIncidents = [],
+  simulationHazards = [],
   selectedHazardId,
   onSelectHazard,
+  onLocateHazardInList,
   focusCoord,
-  extraHazards = [],
+  locatedHazard,
   dismissedAlertIds,
   onDismissAlert,
   onAcknowledgeAllBunching,
@@ -1953,30 +1993,27 @@ export function ControllerDisruptions({
   pollIntervalSeconds?: number
   gapToleranceSeconds?: number
   trafficIncidents?: TrafficIncident[]
+  simulationHazards?: MapHazard[]
   selectedHazardId?: string | null
   onSelectHazard?: (hazardId: string | null) => void
+  onLocateHazardInList?: (hazardId: string) => void
   focusCoord?: { lat: number; lng: number } | null
-  extraHazards?: MapHazard[]
+  locatedHazard?: MapHazard | null
   dismissedAlertIds?: Set<string>
   onDismissAlert?: (id: string) => void
   onAcknowledgeAllBunching?: () => void
 }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const incidentParam = searchParams.get('incident')
-  const hazardParam = searchParams.get('hazard')
   const serviceParam = searchParams.get('service')
   const directionParam = searchParams.get('direction')
   const statusParam = searchParams.get('status')
   const statusFilter: 'active' | 'all' = statusParam === 'all' ? 'all' : 'active'
-  const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped')
+  const [flatView, setFlatView] = useState<{ focusCoord: typeof focusCoord } | null>(null)
+  const viewMode = flatView && flatView.focusCoord === focusCoord ? 'flat' : 'grouped'
+  const scrolledFocus = useRef<typeof focusCoord>(null)
   const [expandedIncidents, setExpandedIncidents] = useState<Set<string>>(new Set())
 
-  useEffect(() => {
-    if (hazardParam && onSelectHazard) {
-      onSelectHazard(hazardParam)
-    }
-  }, [hazardParam, onSelectHazard])
-  
   const simulation = run.data && run.data.status !== 'CLOSED' ? run.data : null
   const error = run.error || (!simulation && liveAlerts.error !== null && !liveAlerts.items.length ? 'Unable to load this data.' : '')
   const items = useMemo(() => (loading || error || !simulation && liveAlerts.isLoading && !liveAlerts.latestPage
@@ -2054,6 +2091,10 @@ export function ControllerDisruptions({
   const handleSelectCorridor = (key: 'all' | string) => {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
+      if (key !== selectedCorridorKey) {
+        next.delete('hazard')
+        next.delete('stop')
+      }
       if (key === 'all') {
         next.delete('service')
         next.delete('direction')
@@ -2076,6 +2117,8 @@ export function ControllerDisruptions({
       if (!incidentId) {
         next.delete('incident')
       } else {
+        next.delete('hazard')
+        next.delete('stop')
         next.set('incident', incidentId)
         const incident = positionedIncidents.find(i => i.id === incidentId)
         if (incident) {
@@ -2116,7 +2159,10 @@ export function ControllerDisruptions({
     )
   }, [selectedCorridorKey, displayedIncidents])
 
-  const affectedStopCodes = useMemo(() => new Set(mapIncidents.flatMap(incident => incident.stopCodes)), [mapIncidents])
+  const locatedStopCode = locatedHazard?.affectedStopCode
+  const affectedStopCodes = useMemo(() => new Set(
+    locatedStopCode ? [locatedStopCode] : mapIncidents.flatMap(incident => incident.stopCodes),
+  ), [locatedStopCode, mapIncidents])
 
   const mapBuses = useMemo(() => positions.flatMap(snapshot => snapshot.directions
     .filter(direction => corridorRoutes.some(route =>
@@ -2379,44 +2425,47 @@ export function ControllerDisruptions({
   }
 
   const corridorHazards = useMemo<MapHazard[]>(() => {
-    const isLive = !run?.data
-    const currentDemoRunId = run?.data?.id
-    const valid = (trafficIncidents || []).filter(i => {
+    const currentDemoRunId = simulation?.id
+    const valid = trafficIncidents.filter(i => {
       if (!validCoord(i.latitude, i.longitude)) return false
-      if (isLive && (i.classification === 'SIMULATION' || i.demoRunId)) return false
-      if (!isLive && currentDemoRunId && i.demoRunId && i.demoRunId !== currentDemoRunId) return false
+      if (!currentDemoRunId && (i.classification === 'SIMULATION' || i.demoRunId)) return false
+      if (i.demoRunId && i.demoRunId !== currentDemoRunId) return false
       return true
     })
     const corridorStops = corridorRoutes.flatMap(r => r.stops).filter(s => validCoord(s.latitude, s.longitude))
-    const mapToHazard = (i: TrafficIncident): MapHazard => {
-      const nearestDistM = corridorStops.length > 0
-        ? Math.min(...corridorStops.map(s => distanceMeters(i.latitude!, i.longitude!, s.latitude!, s.longitude!)))
+    const mappedTraffic = valid.map((incident): MapHazard => ({
+      id: incident.id,
+      disruptionId: incident.disruptionId,
+      demoRunId: incident.demoRunId,
+      latitude: incident.latitude!,
+      longitude: incident.longitude!,
+      incidentType: incident.incidentType,
+      message: incident.message,
+      updatedAt: incident.updatedAt ?? incident.openedAt ?? incident.observedAt ?? undefined,
+    }))
+    const pins = new Map<string, MapHazard>()
+    for (const hazard of [...mappedTraffic, ...simulationHazards]) {
+      const distanceToCorridorM = corridorStops.length
+        ? Math.min(...corridorStops.map(stop => distanceMeters(hazard.latitude, hazard.longitude, stop.latitude!, stop.longitude!)))
         : undefined
-      return {
-        id: i.id,
-        disruptionId: i.disruptionId ?? undefined,
-        latitude: i.latitude!,
-        longitude: i.longitude!,
-        incidentType: i.incidentType,
-        message: i.message,
-        updatedAt: i.updatedAt ?? i.openedAt ?? i.observedAt ?? undefined,
-        distanceToCorridorM: nearestDistM,
+      const associated = `${hazard.serviceId}:${hazard.directionId}` === selectedCorridorKey
+      if (selectedCorridorKey === 'all' || associated || (distanceToCorridorM ?? Infinity) <= 2500) {
+        pins.set(hazard.disruptionId ?? hazard.id, { ...hazard, distanceToCorridorM })
       }
     }
-    const baseList: MapHazard[] = selectedCorridorKey === 'all'
-      ? valid.map(mapToHazard)
-      : !corridorStops.length
-        ? []
-        : valid
-            .filter(i => corridorStops.some(s => distanceMeters(i.latitude!, i.longitude!, s.latitude!, s.longitude!) <= 2500))
-            .map(mapToHazard)
-    if (extraHazards && extraHazards.length > 0) {
-      const existingIds = new Set(baseList.map(h => h.id))
-      const additional = extraHazards.filter(h => !existingIds.has(h.id))
-      return [...baseList, ...additional]
+    if (locatedHazard) {
+      const id = locatedHazard.disruptionId ?? locatedHazard.id
+      pins.set(id, { ...pins.get(id), ...locatedHazard })
     }
-    return baseList
-  }, [trafficIncidents, selectedCorridorKey, corridorRoutes, run, extraHazards])
+    return [...pins.values()]
+  }, [trafficIncidents, simulationHazards, selectedCorridorKey, corridorRoutes, simulation?.id, locatedHazard])
+
+  const showCorridorMap = viewMode === 'grouped' && (corridorRoutes.length > 0 || corridorHazards.length > 0)
+  useEffect(() => {
+    if (!showCorridorMap || !focusCoord || scrolledFocus.current === focusCoord) return
+    document.getElementById('corridor-map')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    scrolledFocus.current = focusCoord
+  }, [focusCoord, showCorridorMap])
 
   return <div className="space-y-10">
     <section aria-labelledby="bunching-title" className="space-y-4">
@@ -2462,7 +2511,7 @@ export function ControllerDisruptions({
           <Button
             variant={viewMode === 'grouped' ? 'secondary' : 'ghost'}
             size="sm"
-            onClick={() => setViewMode('grouped')}
+            onClick={() => setFlatView(null)}
             aria-pressed={viewMode === 'grouped'}
           >
             Grouped
@@ -2470,7 +2519,7 @@ export function ControllerDisruptions({
           <Button
             variant={viewMode === 'flat' ? 'secondary' : 'ghost'}
             size="sm"
-            onClick={() => setViewMode('flat')}
+            onClick={() => setFlatView({ focusCoord })}
             aria-pressed={viewMode === 'flat'}
           >
             Flat
@@ -2546,7 +2595,7 @@ export function ControllerDisruptions({
         </div>
       )}
 
-      {viewMode === 'grouped' && !!corridorRoutes.length && (
+      {showCorridorMap && (
         <BunchingMap
           routes={corridorRoutes}
           affectedStopCodes={affectedStopCodes}
@@ -2558,6 +2607,7 @@ export function ControllerDisruptions({
           hazards={corridorHazards}
           selectedHazardId={selectedHazardId}
           onSelectHazard={onSelectHazard}
+          onLocateHazardInList={onLocateHazardInList}
           focusCoord={focusCoord}
         />
       )}
@@ -2640,7 +2690,7 @@ export function ControllerAudit({ decisions, suggestions, aiAudits, loading }: {
   const aiAuditError = aiAudits.error !== null && !aiAudits.items.length ? 'Unable to load AI audit records.' : ''
   return <div className="space-y-10">
     <section aria-labelledby="early-suggestions-title" className="space-y-4"><h2 id="early-suggestions-title" className="font-medium">Early controller mitigation suggestions</h2>
-      <p className="text-sm text-muted-foreground">Actions recorded before an AI diagnosis or mitigation recommendation was available.</p>
+      <p className="text-sm text-muted-foreground">Actions recorded before a diagnosis or mitigation recommendation was available.</p>
       <DataMessage error={suggestionError} loading={loading || suggestions.isLoading && !suggestions.latestPage} empty={!suggestionItems.length}>No early controller mitigation suggestions have been saved.</DataMessage>
       {!!suggestionItems.length && <Table containerProps={{ role: 'region', 'aria-label': 'Early controller mitigation suggestions', tabIndex: 0,
         onScroll: suggestions.onScroll, className: 'max-h-[26rem] overflow-auto rounded-lg border' }} className="min-w-[48rem]">

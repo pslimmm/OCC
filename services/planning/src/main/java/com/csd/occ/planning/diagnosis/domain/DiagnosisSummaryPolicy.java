@@ -22,25 +22,79 @@ public final class DiagnosisSummaryPolicy {
     private static final DateTimeFormatter SGT_TIME = DateTimeFormatter.ofPattern("HH:mm 'SGT'", Locale.ROOT)
             .withZone(ZoneId.of("Asia/Singapore"));
 
-    public Summary summarize(String causeCode, String causeSubtype, List<String> evidenceIds, EvidenceSnapshot snapshot) {
-        if ("UNKNOWN".equals(causeCode)) return new Summary(UNKNOWN_SUMMARY, List.of());
-        if (causeCode == null || (!"TRAFFIC_INCIDENT".equals(causeCode)
-                && !"PASSENGER_SURGE".equals(causeCode) && !"HEADWAY_DECAY".equals(causeCode)))
-            return new Summary("Diagnosis details are unavailable for this retained result.", List.of());
-        if (snapshot == null) return unavailable(causeCode, causeSubtype);
-        var event = snapshot.event();
-        if (!PlanningScope.valid(event.classification(), event.demoRunId())) return unavailable(causeCode, causeSubtype);
+    public static List<String> displayLimitations(List<String> limitations) {
+        return limitations.stream().map(limitation -> switch (limitation) {
+            case "Missing evidence field: traffic-incidents",
+                    "Missing evidence field: traffic-incidents-within-lookback",
+                    "No nearby incidents: No traffic accidents or roadworks reported along this route." ->
+                    "The retained diagnosis has limited evidence about incidents along the route.";
+            default -> limitation;
+        }).distinct().toList();
+    }
 
-        if ("TRAFFIC_INCIDENT".equals(causeCode)) {
-            return summarizeTrafficIncident(causeSubtype, evidenceIds, snapshot);
+    public Summary summarize(String causeCode, String causeSubtype, List<String> evidenceIds, EvidenceSnapshot snapshot) {
+        if (causeCode == null) {
+            return new Summary("Diagnosis details are unavailable for this retained result.", List.of());
         }
-        if ("PASSENGER_SURGE".equals(causeCode)) {
-            return summarizePassengerSurge(causeSubtype, evidenceIds, snapshot);
+        if (snapshot == null || !PlanningScope.valid(snapshot.event().classification(), snapshot.event().demoRunId())) {
+            return "UNKNOWN".equals(causeCode) ? new Summary(UNKNOWN_SUMMARY, List.of()) : unavailable(causeCode, causeSubtype);
         }
-        if ("HEADWAY_DECAY".equals(causeCode)) {
-            return summarizeHeadwayDecay(causeSubtype, evidenceIds, snapshot);
+        if (SimulationRoadworksDiagnosisPolicy.CAUSE_CODE.equals(causeCode)) {
+            return summarizeSimulatedRoadworks(evidenceIds, snapshot);
         }
-        return new Summary("Diagnosis details are unavailable for this retained result.", List.of());
+        Summary summary = switch (causeCode) {
+            case "TRAFFIC_INCIDENT" -> summarizeTrafficIncident(causeSubtype, evidenceIds, snapshot);
+            case "PASSENGER_SURGE" -> summarizePassengerSurge(snapshot);
+            case "HEADWAY_DECAY" -> summarizeHeadwayDecay(causeSubtype, snapshot);
+            case "UNKNOWN" -> new Summary(UNKNOWN_SUMMARY, List.of());
+            default -> new Summary("Diagnosis details are unavailable for this retained result.", List.of());
+        };
+        return withSimulationHazards(summary, snapshot, null);
+    }
+
+    private Summary summarizeSimulatedRoadworks(List<String> evidenceIds, EvidenceSnapshot snapshot) {
+        var verified = SimulationRoadworksDiagnosisPolicy.verify(snapshot)
+                .filter(delay -> evidenceIds != null && evidenceIds.contains(delay.hazardEvidenceId()));
+        if (verified.isEmpty()) {
+            return withSimulationHazards(new Summary(UNKNOWN_SUMMARY, List.of()), snapshot, null);
+        }
+        var delay = verified.orElseThrow();
+        String cause = ("Simulated roadworks delayed the leading bus by %ds. "
+                + "That reduced its gap to the following bus from %ds to %ds at stop %s.")
+                .formatted(delay.delaySeconds(), delay.baselineGapSeconds(), delay.observedGapSeconds(),
+                        cleanText(snapshot.event().monitoredStopCode()));
+        return withSimulationHazards(new Summary(cause, List.of()), snapshot, delay.hazardEvidenceId());
+    }
+
+    private Summary withSimulationHazards(Summary summary, EvidenceSnapshot snapshot, String explainedHazardId) {
+        List<IncidentEvidence> hazards = snapshot.context().incidents().stream()
+                .filter(IncidentEvidence::isSimulationHazard)
+                .filter(incident -> Objects.equals(snapshot.event().demoRunId(), incident.demoRunId())
+                        && snapshot.allowedEvidenceIds().contains(incident.evidenceId()))
+                .sorted(Comparator.comparing(DiagnosisSummaryPolicy::incidentName).thenComparing(IncidentEvidence::evidenceId))
+                .toList();
+        if (hazards.isEmpty()) return summary;
+
+        String names = hazards.stream().filter(hazard -> !hazard.evidenceId().equals(explainedHazardId))
+                .map(DiagnosisSummaryPolicy::incidentName).distinct().collect(Collectors.joining(", "));
+        String context = names.isEmpty() ? "" : explainedHazardId == null
+                ? "The diagnosis includes simulated incident evidence for " + names.toLowerCase(Locale.ROOT) + "."
+                : "Other simulated hazards along this route: " + names + ".";
+        String text = context.isEmpty() ? summary.likelyCause()
+                : truncate(summary.likelyCause(), MAX_SUMMARY_LENGTH - context.length() - 1) + " " + context;
+        return new Summary(text,
+                java.util.stream.Stream.concat(summary.evidenceDetails().stream(),
+                        hazards.stream().map(hazard -> detail(hazard, snapshot))).toList());
+    }
+
+    private static String incidentName(IncidentEvidence incident) {
+        if (!incident.isSimulationHazard()) return cleanText(incident.incidentType());
+        return switch (cleanText(incident.incidentType())) {
+            case "FLOOD" -> "Flooding";
+            case "ROADWORKS" -> "Roadworks";
+            case "RAIL_DISRUPTION" -> "Rail disruption";
+            default -> "Hazard";
+        };
     }
 
     private Summary summarizeTrafficIncident(String causeSubtype, List<String> evidenceIds, EvidenceSnapshot snapshot) {
@@ -48,7 +102,8 @@ public final class DiagnosisSummaryPolicy {
         Set<String> supportedIds = evidenceIds == null ? Set.of() : evidenceIds.stream()
                 .filter(Objects::nonNull).filter(id -> !id.isBlank()).collect(Collectors.toSet());
         List<IncidentEvidence> incidents = snapshot.context().incidents().stream()
-                .filter(incident -> incident.evidenceId() != null && supportedIds.contains(incident.evidenceId())
+                .filter(incident -> !incident.isSimulationHazard()
+                        && incident.evidenceId() != null && supportedIds.contains(incident.evidenceId())
                         && snapshot.allowedEvidenceIds().contains(incident.evidenceId())
                         && Objects.equals(event.classification(), incident.classification())
                         && Objects.equals(event.demoRunId(), incident.demoRunId()))
@@ -79,7 +134,7 @@ public final class DiagnosisSummaryPolicy {
                 incidents.stream().map(incident -> detail(incident, snapshot)).toList());
     }
 
-    private Summary summarizePassengerSurge(String causeSubtype, List<String> evidenceIds, EvidenceSnapshot snapshot) {
+    private Summary summarizePassengerSurge(EvidenceSnapshot snapshot) {
         var event = snapshot.event();
         var arrivals = snapshot.context().arrivals();
         String leadLoad = null;
@@ -96,33 +151,20 @@ public final class DiagnosisSummaryPolicy {
         return new Summary(truncate(summary, MAX_SUMMARY_LENGTH), List.of());
     }
 
-    private Summary summarizeHeadwayDecay(String causeSubtype, List<String> evidenceIds, EvidenceSnapshot snapshot) {
+    private Summary summarizeHeadwayDecay(String causeSubtype, EvidenceSnapshot snapshot) {
         var event = snapshot.event();
         Integer observed = event.observedHeadwaySeconds() == null || event.observedHeadwaySeconds().isEmpty()
                 ? null : event.observedHeadwaySeconds().getFirst();
         int expected = event.expectedHeadwaySeconds();
         String stop = cleanText(event.monitoredStopCode());
-        String observedStr = observed != null ? observed + "s" : "compressed";
-
-        String summary;
-        if ("TERMINAL_DISPATCH".equalsIgnoreCase(causeSubtype)) {
-            summary = String.format(Locale.ROOT,
-                    "Interchange dispatch gap: Buses departed the interchange too close together, reaching stop %s only %s apart (scheduled: %ds).",
-                    stop, observedStr, expected);
-        } else if ("FLEET_CAPACITY_ASYMMETRY".equalsIgnoreCase(causeSubtype)) {
-            summary = String.format(Locale.ROOT,
-                    "Bus size mismatch: Differing vehicle passenger capacities between leading and trailing vehicles accelerated headway compression to %s (scheduled: %ds) at stop %s.",
-                    observedStr, expected, stop);
-        } else if ("PEAK_CONGESTION".equalsIgnoreCase(causeSubtype)) {
-            String timeStr = formatSingaporeTime(event.firstConfirmedAt());
-            summary = String.format(Locale.ROOT,
-                    "Rush hour traffic: Heavy corridor congestion (%s) slowed the lead bus, shrinking spacing from %ds to %s at stop %s.",
-                    timeStr, expected, observedStr, stop);
-        } else {
-            summary = String.format(Locale.ROOT,
-                    "Route spacing drift: Trailing bus caught up to %s (scheduled: %ds) at stop %s as small stop delays compounded along the corridor without road incidents.",
-                    observedStr, expected, stop);
-        }
+        String spacing = observed == null ? "Buses were closer than scheduled at stop %s.".formatted(stop)
+                : "Buses were %ds apart at stop %s against a scheduled %ds gap.".formatted(observed, stop, expected);
+        String summary = spacing + switch (causeSubtype == null ? "" : causeSubtype.toUpperCase(Locale.ROOT)) {
+            case "TERMINAL_DISPATCH" -> " Interchange dispatch spacing is a possible contributor.";
+            case "FLEET_CAPACITY_ASYMMETRY" -> " Differences in vehicle capacity are a possible contributor.";
+            case "PEAK_CONGESTION" -> " The event occurred during the peak period at " + formatSingaporeTime(event.firstConfirmedAt()) + ".";
+            default -> " The cause of the reduced spacing remains uncertain.";
+        };
         return new Summary(truncate(summary, MAX_SUMMARY_LENGTH), List.of());
     }
 
@@ -158,8 +200,9 @@ public final class DiagnosisSummaryPolicy {
 
     private DiagnosisEvidenceDetail detail(IncidentEvidence incident, EvidenceSnapshot snapshot) {
         var event = snapshot.event();
-        var position = BunchingEvidenceSupportPolicy.busPositionFor(event, snapshot.context()).orElse(null);
-        Long secondsBefore = incident.observedAt() == null || event.firstConfirmedAt() == null ? null
+        var position = incident.isSimulationHazard() ? null
+                : BunchingEvidenceSupportPolicy.busPositionFor(event, snapshot.context()).orElse(null);
+        Long secondsBefore = incident.isSimulationHazard() || incident.observedAt() == null || event.firstConfirmedAt() == null ? null
                 : Duration.between(incident.observedAt(), event.firstConfirmedAt()).toSeconds();
         Long distanceMeters = position == null || !BunchingEvidenceSupportPolicy.hasValidCoordinates(
                 incident.latitude(), incident.longitude()) ? null
@@ -168,7 +211,7 @@ public final class DiagnosisSummaryPolicy {
                         position.longitude().doubleValue()) * 1_000);
         boolean positionHasCoordinates = position != null && BunchingEvidenceSupportPolicy.hasValidCoordinates(
                 position.latitude(), position.longitude());
-        return new DiagnosisEvidenceDetail(incident.evidenceId(), cleanText(incident.incidentType()),
+        return new DiagnosisEvidenceDetail(incident.evidenceId(), incidentName(incident),
                 cleanText(incident.message()), incident.observedAt(), incident.fetchedAt(), event.firstConfirmedAt(),
                 secondsBefore, distanceMeters, positionHasCoordinates ? position.evidenceId() : null,
                 event.monitoredStopCode(), incident.latitude(), incident.longitude());

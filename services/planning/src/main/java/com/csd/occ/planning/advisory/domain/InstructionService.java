@@ -2,6 +2,7 @@ package com.csd.occ.planning.advisory.domain;
 
 import com.csd.occ.planning.diagnosis.domain.PlanningScopePort;
 import java.time.Clock;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -9,6 +10,8 @@ import java.util.UUID;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.csd.occ.planning.domain.audit.ApplicationAuditEvent;
@@ -42,20 +45,44 @@ public class InstructionService {
         var scope = scopes.current();
         if (scope.demoRunId() == null) return Page.empty(PageRequest.of(page, size));
         var request = PageRequest.of(page, size);
-        return pendingOnly
-                ? proposals.findByDemoRunIdAndStatusOrderByCreatedAtAsc(scope.demoRunId(), "PENDING", request)
-                : proposals.findByDemoRunIdOrderByCreatedAtAsc(scope.demoRunId(), request);
+        if (!pendingOnly) return proposals.findByDemoRunIdOrderByCreatedAtAsc(scope.demoRunId(), request);
+        var eligible = currentPending(scope.demoRunId());
+        return new PageImpl<>(eligible.stream().skip(request.getOffset()).limit(size).toList(), request, eligible.size());
+    }
+
+    List<AdvisoryProposal> currentPending(UUID runId) {
+        var pending = proposals.findByDemoRunIdAndStatusOrderByCreatedAtAsc(runId, "PENDING", Pageable.unpaged(Sort.by("id")));
+        return eligiblePending(runId, pending.getContent());
+    }
+
+    List<AdvisoryProposal> eligiblePending(UUID runId, List<AdvisoryProposal> candidates) {
+        if (candidates.isEmpty()) return List.of();
+        var fleet = context.fleet(runId);
+        if (!List.of("RUNNING", "REPLAY_COMPLETE").contains(fleet.status())) return List.of();
+        var buses = new HashMap<String, AdvisoryContextPort.Bus>();
+        for (var bus : fleet.items()) if (bus.captainUserId() != null) buses.put(bus.busId(), bus);
+        var hazards = new HashMap<UUID, AdvisoryContextPort.Hazard>();
+        var limits = context.limits();
+        return candidates.stream().filter(proposal -> {
+            var bus = buses.get(proposal.busId());
+            if (bus == null) return false;
+            var hazard = hazards.computeIfAbsent(proposal.disruptionId(), context::hazard);
+            try {
+                eligibleMessage(proposal, proposal.candidate(), bus, hazard, limits);
+                return true;
+            } catch (AdvisoryConflictException | IllegalArgumentException ineligible) {
+                return false;
+            }
+        }).toList();
     }
     @Transactional
     public String preview(UUID id, AdvisoryCandidate override) {
         var proposal = proposals.findById(id).orElseThrow(AdvisoryNotFoundException::new);
         if (!proposal.demoRunId().equals(scopes.current().demoRunId()))
             throw new AdvisoryConflictException("Proposal is outside the active simulation");
-        var hazard = context.hazard(proposal.disruptionId());
-        if (!"ACTIVE".equals(hazard.status()) || !proposal.context().hasSameEvidenceAs(hazard))
-            throw new AdvisoryConflictException("Hazard evidence changed; review a current proposal");
-        return policy.message(override == null ? proposal.candidate() : override,
-                assignedBus(proposal.demoRunId(), proposal.busId()), hazard.exposures(), hazard.facts().instruction(), context.limits());
+        var bus = assignedBus(proposal.demoRunId(), proposal.busId());
+        return eligibleMessage(proposal, override == null ? proposal.candidate() : override, bus,
+                context.hazard(proposal.disruptionId()), context.limits());
     }
     @Transactional
     public IssuedInstruction decide(UUID id, AdvisoryCandidate override, String rationale, PlanningActor actor, UUID replaceInstructionId) {
@@ -75,12 +102,8 @@ public class InstructionService {
         if (!List.of("RUNNING", "REPLAY_COMPLETE").contains(fleet.status())) throw new AdvisoryConflictException("Run is closed");
         var bus = fleet.items().stream().filter(item -> item.busId().equals(proposal.busId()) && item.captainUserId() != null)
                 .findFirst().orElseThrow(() -> new AdvisoryConflictException("Captain assignment unavailable"));
-        if (!bus.serviceId().equals(proposal.bus().serviceId()) || bus.directionId() != proposal.bus().directionId())
-            throw new AdvisoryConflictException("Bus route changed; review a current advisory for its service and direction");
         var hazard = context.hazard(proposal.disruptionId());
-        if (!hazard.status().equals("ACTIVE") || !proposal.context().hasSameEvidenceAs(hazard))
-            throw new AdvisoryConflictException("Hazard evidence changed or is no longer active; review a current proposal");
-        String message = policy.message(chosen, bus, hazard.exposures(), hazard.facts().instruction(), context.limits());
+        String message = eligibleMessage(proposal, chosen, bus, hazard, context.limits());
         if (replaceInstructionId != null) {
             var predecessorKey = instructions.findKeyById(replaceInstructionId).orElseThrow(AdvisoryNotFoundException::new);
             if (!runId.equals(predecessorKey.getDemoRunId()) || !bus.busId().equals(predecessorKey.getBusId()))
@@ -99,7 +122,7 @@ public class InstructionService {
                 throw new AdvisoryConflictException("Active movement instruction " + current.id() + " must be explicitly replaced");
         }
         instructions.flush();
-        var issued = new IssuedInstruction(id, proposal.disruptionId(), runId, bus, chosen, message,
+        var issued = new IssuedInstruction(id, replaceInstructionId, proposal.disruptionId(), runId, bus, chosen, message,
                 hazard.classification(), actor.subject(), clock.instant(), context.limits().acknowledgementWindow());
         var decidedAt = clock.instant();
         proposal.decide(chosen, actor.subject(), rationale, replaceInstructionId, decidedAt);
@@ -121,6 +144,15 @@ public class InstructionService {
                 decisionDetails, "advisory-decision:" + proposal.id()));
         recordInstruction(saved, "INSTRUCTION_ISSUED", actor.subject());
         return saved;
+    }
+
+    private String eligibleMessage(AdvisoryProposal proposal, AdvisoryCandidate candidate, AdvisoryContextPort.Bus bus,
+            AdvisoryContextPort.Hazard hazard, AdvisoryContextPort.Limits limits) {
+        if (!bus.serviceId().equals(proposal.bus().serviceId()) || bus.directionId() != proposal.bus().directionId())
+            throw new AdvisoryConflictException("Bus route changed; review a current advisory for its service and direction");
+        if (!"ACTIVE".equals(hazard.status()) || !proposal.context().hasSameEvidenceAs(hazard))
+            throw new AdvisoryConflictException("Hazard evidence changed or is no longer active; review a current proposal");
+        return policy.message(candidate, bus, hazard, limits);
     }
 
     private IssuedInstruction replayDecision(AdvisoryProposal proposal, AdvisoryCandidate override, String rationale,
@@ -224,8 +256,11 @@ public class InstructionService {
             if ("CLEARED".equals(hazard.status())) instruction.cancel("SOURCE_WITHDRAWN");
             else {
                 var p = instruction.parameters();
-                if (p.stopSequence() != null && bus.progress() != null
-                        && bus.progress().stopSequence() > p.stopSequence() + (p.subsequentStopCount() == null ? 0 : p.subsequentStopCount()))
+                // A HOLD was issued for the exact next occurrence. A different next stop includes a trip wrap.
+                var nextStop = instruction.type() == InstructionType.HOLD ? bus.nextStopSequence() : null;
+                if (p.stopSequence() != null && (nextStop != null ? !nextStop.equals(p.stopSequence())
+                        : bus.progress() != null && bus.progress().stopSequence() > p.stopSequence()
+                            + (p.subsequentStopCount() == null ? 0 : p.subsequentStopCount())))
                     instruction.expire("STOP_RANGE_PASSED");
             }
         }

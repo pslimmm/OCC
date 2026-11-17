@@ -126,8 +126,11 @@ class BunchingInstructionServiceTest {
         var scopes = mock(PlanningScopePort.class);
         var auditEvents = mock(ApplicationAuditEventRepository.class);
         var guards = mock(AssignmentBusGuards.class);
+        var estimatedArrivalAt = busState == FollowingBusState.READY_TO_DEPART ? NOW.plusSeconds(15) : NOW.minusSeconds(1);
+        var progress = new AdvisoryContextPort.Progress("44251", 2, NOW, 30, List.of(), List.of(),
+                estimatedArrivalAt, NOW.plusSeconds(60), NOW.plusSeconds(30));
         var bus = new AdvisoryContextPort.Bus("demo-bus-2", "trip-2", "SBS5898U", "190", 1, CAPTAIN,
-                "ASSIGNED", new AdvisoryContextPort.Progress("44241", 1, NOW, 30, List.of(), List.of()));
+                "ASSIGNED", progress, 0, 2);
         var hazard = new AdvisoryContextPort.Hazard(ID, "BUNCHING", "ACTIVE", null, "SIMULATION", RUN,
                 null, NOW, null, List.of(), List.of());
         when(records.findByIdempotencyKey(ID)).thenReturn(Optional.of(record));

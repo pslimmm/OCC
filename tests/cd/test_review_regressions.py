@@ -38,6 +38,12 @@ class RoleBoundaryTests(unittest.TestCase):
 
 
 class RecoveryWorkflowTests(unittest.TestCase):
+    def test_lifecycle_checkout_includes_history_for_published_release_ancestry(self):
+        workflow = yaml.load((ROOT / '.github/workflows/environment-control.yml').read_text(), Loader=yaml.BaseLoader)
+        checkout = next(step for step in workflow['jobs']['control']['steps']
+                        if step.get('uses', '').startswith('actions/checkout@'))
+        self.assertEqual(checkout['with']['fetch-depth'], '0')
+
     def test_recover_exposes_the_original_operation_id_instead_of_generating_one(self):
         workflow=yaml.load((ROOT/'.github/workflows/environment-control.yml').read_text(),Loader=yaml.BaseLoader)
         self.assertIn('recovery-operation-id',workflow['on']['workflow_dispatch']['inputs'])

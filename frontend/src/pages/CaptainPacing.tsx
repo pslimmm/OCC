@@ -64,7 +64,7 @@ export function CaptainPacing({ pacing }: { pacing: CaptainRoute['pacing'] }) {
         Bus ahead: {states[pacing.ahead?.state ?? 'NO_DATA'].label.toLowerCase()}.
         Bus behind: {states[pacing.behind?.state ?? 'NO_DATA'].label.toLowerCase()}.
       </p>
-      <p className="text-sm text-muted-foreground">Pacing calculated {formatSgtTime(pacing.calculatedAt)} from predictions fetched {formatSgtTime(pacing.observedAt)}.</p>
+      <p className="text-sm text-muted-foreground">Pacing calculated {formatSgtTime(pacing.calculatedAt)} from predictions as of {formatSgtTime(pacing.observedAt)}.</p>
     </>}
   </section>
 }
