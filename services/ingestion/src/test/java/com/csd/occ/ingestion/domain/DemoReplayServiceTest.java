@@ -203,6 +203,51 @@ class DemoReplayServiceTest {
     }
 
     @Test
+    void onlyTheLeadBusesForecastChangesOnceItReachesTheRoadworks() {
+        var runs = mock(DemoRunRepository.class);
+        var mode = mock(DemoModeService.class);
+        var topology = mock(ReferenceTopologyPort.class);
+        var arrivals = mock(BusArrivalObservationRepository.class);
+        var hazards = mock(DemoHazardReplayService.class);
+        var clock = mock(Clock.class);
+        var runId = UUID.randomUUID();
+        var gaps = List.of(Duration.ofSeconds(120), Duration.ofSeconds(120));
+        var run = new DemoRun(runId, NOW, "route190-bunching-v1", 190,
+                new DemoRunConfiguration("190", 1, 3, gaps.getFirst(), gaps, "44141", DemoScenario.ROADWORKS_BUNCHING));
+        run.startReplay();
+        when(runs.findActiveId()).thenReturn(Optional.of(runId));
+        when(runs.findByIdForUpdate(runId)).thenReturn(Optional.of(run));
+        when(mode.enabled()).thenReturn(true);
+        when(clock.instant()).thenReturn(NOW.plusSeconds(5), NOW.plusSeconds(30), NOW.plusSeconds(44), NOW.plusSeconds(50));
+        when(topology.activeVersion()).thenReturn(Optional.of(new ReferenceTopologyPort.ReferenceTopologyVersion(UUID.randomUUID(), "a".repeat(64))));
+        List<List<Instant>> batches = new ArrayList<>();
+        doAnswer(invocation -> {
+            Iterable<BusArrivalObservation> batch = invocation.getArgument(0);
+            var rows = StreamSupport.stream(batch.spliterator(), false).toList();
+            batches.add(rows.stream().map(BusArrivalObservation::getEstimatedArrivalAt).toList());
+            return rows;
+        }).when(arrivals).saveAll(org.mockito.ArgumentMatchers.any());
+        var service = new DemoReplayService(runs, mock(DemoVehicleAssignmentRepository.class), mock(PollRunRepository.class),
+                mock(RawObservationRepository.class), arrivals, mock(TrafficIncidentObservationRepository.class), topology,
+                clock, mode, new DemoReplayConfiguration("route190-bunching-v1", 190, Duration.ofSeconds(90)), hazards,
+                mock(ApplicationAuditEventRepository.class));
+
+        service.replayNext();
+        service.replayNext();
+        assertEquals(1, batches.size());
+        verify(hazards).emit(run, 0, NOW.plusSeconds(5));
+        service.replayNext();
+        service.replayNext();
+
+        assertEquals(3, batches.size());
+        assertEquals(Duration.ofSeconds(120), Duration.between(batches.getFirst().get(0), batches.getFirst().get(1)));
+        assertEquals(Duration.ofSeconds(105), Duration.between(batches.getFirst().get(0), batches.getLast().get(0)));
+        assertEquals(Duration.ofSeconds(15), Duration.between(batches.getLast().get(0), batches.getLast().get(1)));
+        assertEquals(batches.getFirst().subList(1, 3), batches.getLast().subList(1, 3));
+        assertEquals(batches.get(1), batches.get(2));
+    }
+
+    @Test
     void replayPreservesConfiguredAdjacentBunchingGaps() {
         DemoRunRepository runs = mock(DemoRunRepository.class);
         BusArrivalObservationRepository arrivals = mock(BusArrivalObservationRepository.class);

@@ -20,7 +20,11 @@ import com.csd.occ.ingestion.domain.BunchingFeedService;
 import com.csd.occ.ingestion.domain.DemoModeService;
 import com.csd.occ.ingestion.domain.DemoReplayScenario;
 import com.csd.occ.ingestion.domain.DemoReplayService;
+import com.csd.occ.ingestion.domain.DemoRun;
+import com.csd.occ.ingestion.domain.DemoRunConfiguration;
 import com.csd.occ.ingestion.domain.DemoRunDetails;
+import com.csd.occ.ingestion.domain.DemoRunRepository;
+import com.csd.occ.ingestion.domain.DemoScenario;
 import com.csd.occ.ingestion.domain.TrafficIncidentPollFeedService;
 import com.csd.occ.ingestion.domain.TrafficIncidentFeedPort;
 import com.csd.occ.ingestion.domain.TrafficIncidentPollingService;
@@ -36,6 +40,7 @@ import com.csd.occ.ingestion.infrastructure.config.DemoReplaySchedule;
 import com.csd.occ.ingestion.infrastructure.config.PacingSchedule;
 import com.csd.occ.ingestion.infrastructure.config.TrafficIncidentSchedule;
 import com.csd.occ.ingestion.infrastructure.datamall.DataMallAdapter;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.List;
@@ -87,6 +92,7 @@ class IngestionStartupIT {
     @Autowired PollRunRepository runs;
     @Autowired RawObservationRepository observations;
     @Autowired BusArrivalObservationRepository arrivals;
+    @Autowired DemoRunRepository demoRunRecords;
 
     @Test
     void keepsReadinessAvailableAndDeniesRemovedMetricsEndpoint() throws Exception {
@@ -107,6 +113,35 @@ class IngestionStartupIT {
     @Autowired TrafficIncidentPollFeedService trafficIncidentPollFeed;
     @Autowired TrafficIncidentPollingService trafficIncidentPolling;
     @Autowired org.springframework.context.ApplicationContext context;
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void storesRoadworksPresetInTheExistingSchemaAndReadsItThroughTheDemoApi() throws Exception {
+        var now = Instant.now();
+        var gap = Duration.ofSeconds(120);
+        var run = new DemoRun(UUID.randomUUID(), now, "bunching-v1", 190,
+                new DemoRunConfiguration("190", 1, 3, gap, List.of(gap, gap), "44141", DemoScenario.ROADWORKS_BUNCHING));
+        run.close(now);
+        demoRunRecords.saveAndFlush(run);
+
+        assertThat(jdbc.queryForMap("select scenario_key, scenario_version, simulation_scenario from ingestion.demo_run where id=?",
+                run.id())).containsEntry("scenario_key", "roadworks-bunching").containsEntry("scenario_version", "v1")
+                .containsEntry("simulation_scenario", "BUNCHING");
+        mvc.perform(get("/api/v1/demo-runs/{runId}", run.id())
+                        .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_CONTROLLER"))))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.scenario").value("ROADWORKS_BUNCHING"))
+                .andExpect(jsonPath("$.monitoredStopCode").value("44141"));
+    }
+
+    @Test
+    void rejectsTheRetiredRoadworksPresetWhenStartingANewRun() throws Exception {
+        mvc.perform(post("/api/v1/demo-runs").with(jwt().authorities(new SimpleGrantedAuthority("ROLE_CONTROLLER")))
+                        .contentType("application/json").content("""
+                                {"serviceId":"190","directionId":1,"busCount":3,"dispatchGapSeconds":120,
+                                 "monitoredStopCode":"44141","scenario":"ROADWORKS_BUNCHING"}
+                                """))
+                .andExpect(status().isBadRequest());
+    }
 
     @Test
     void migrationsAndPollingWorkWithServiceCredentials() {
@@ -343,7 +378,7 @@ class IngestionStartupIT {
     void demoReplayRowsRemainRunScopedAndUnavailableFromLiveQueries() throws Exception {
         topology.replaceIfChanged(new BusReferencePort.BusReferenceData(
                 List.of(new BusReferencePort.BusStopRecord("44251", "Demo Road", "Demo Stop",
-                        new java.math.BigDecimal("1.377"), new java.math.BigDecimal("103.771"))),
+                        new java.math.BigDecimal("1.38031"), new java.math.BigDecimal("103.76232"))),
                 List.of(new BusReferencePort.BusServiceRecord("190", "SBST", "TRUNK")),
                 List.of(new BusReferencePort.BusRouteStopRecord("190", "SBST", 1, 1, "44251",
                         java.math.BigDecimal.ZERO))), "d".repeat(64));
@@ -384,6 +419,17 @@ class IngestionStartupIT {
                 .andExpect(jsonPath("$.followingBusReference").value("demo-190-3"));
         var latestSnapshot = simulationPage.items().getLast();
         var currentIds = current.stream().map(BunchingFeedService.Arrival::observationId).toList();
+        mvc.perform(get("/internal/v1/ingestion/demo-runs/{run}/planning-context", started.id())
+                        .param("at", latestSnapshot.fetchedAt().toString()).param("serviceId", "190")
+                        .param("stopCode", "44251").param("directionId", "1")
+                        .param("arrivalObservationIds", currentIds.stream().map(UUID::toString).toArray(String[]::new))
+                        .header("X-OCC-Peer-Token", "test-planning-to-ingestion-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.incidents.length()").value(1))
+                .andExpect(jsonPath("$.incidents[0].incidentType").value("ROADWORKS"))
+                .andExpect(jsonPath("$.incidents[0].latitude").value(1.38031))
+                .andExpect(jsonPath("$.incidents[0].longitude").value(103.76232))
+                .andExpect(jsonPath("$.simulationDelay").doesNotExist());
         var detectorEvidence = new BunchingControlPort.CurrentEvidence(started.id(), bunchingEventId, "190", "44251", 1,
                 "BUNCHING", latestSnapshot.rawObservationId(), latestSnapshot.fetchedAt(), Instant.now().plusSeconds(60), true, currentIds);
         when(bunching.currentEvidence(started.id(), bunchingEventId)).thenReturn(java.util.Optional.of(detectorEvidence));
@@ -493,7 +539,7 @@ class IngestionStartupIT {
     @Autowired PacingService pacing;
 
     @Test
-    void pacingUsesSimulationRegistrationsFromTheLatestReplayStepOnlyWhileTheRunIsActive() {
+    void pacingKeepsGeneratingPredictionsAfterReplayUntilTheRunCloses() throws Exception {
         topology.replaceIfChanged(new BusReferencePort.BusReferenceData(
                 List.of(new BusReferencePort.BusStopRecord("44251", "Demo Road", "Demo Stop",
                         new java.math.BigDecimal("1.377"), new java.math.BigDecimal("103.771"))),
@@ -534,6 +580,37 @@ class IngestionStartupIT {
                 });
             }
         }
+
+        UUID lastPoll = jdbc.queryForObject("""
+                select id from ingestion.poll_run where demo_run_id = ? and source = 'DEMO'
+                order by started_at desc, id desc limit 1
+                """, UUID.class, started.id());
+        jdbc.update("update ingestion.poll_run set source = 'DEMO_ARRIVALS' where id = ?", lastPoll);
+        jdbc.update("""
+                update ingestion.bus_arrival_observation
+                set fetched_at = fetched_at - interval '4 minutes',
+                    estimated_arrival_at = estimated_arrival_at - interval '4 minutes'
+                where poll_run_id = ?
+                """, lastPoll);
+        UUID captain = UUID.randomUUID();
+        jdbc.update("""
+                update ingestion.demo_vehicle_assignment set captain_user_id = ?
+                where demo_run_id = ? and vehicle_registration_number = 'DEMO-190-02'
+                """, captain, started.id());
+
+        var projected = pacing.refresh();
+        assertThat(projected.demoRunId()).contains(started.id());
+        assertThat(projected.metrics().stream().filter(metric -> "SIMULATION".equals(metric.classification())))
+                .hasSize(3).allMatch(metric -> metric.observedAt().equals(projected.calculatedAt()));
+        mvc.perform(get("/api/v1/captain-routes/current")
+                        .with(jwt().jwt(token -> token.subject(captain.toString()))
+                                .authorities(new SimpleGrantedAuthority("ROLE_CAPTAIN"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bus.registrationNumber").value("DEMO-190-02"))
+                .andExpect(jsonPath("$.pacing.ahead.headwaySeconds").value(45))
+                .andExpect(jsonPath("$.pacing.behind.headwaySeconds").value(45));
+        assertThat(jdbc.queryForObject("select count(*) from ingestion.bus_arrival_observation where demo_run_id = ?",
+                Integer.class, started.id())).isEqualTo(9);
 
         demoRuns.close(started.id());
 

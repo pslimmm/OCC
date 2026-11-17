@@ -15,7 +15,9 @@ public record ValidatedMitigationContext(
         MitigationValidationStatus validationStatus,
         List<String> evidenceIds,
         List<Long> currentPredictionGaps,
-        Instant predictionValidUntil) {
+        Instant predictionValidUntil,
+        Integer approvedControlStopSequence,
+        java.util.UUID controlPredictionId) {
 
     public ValidatedMitigationContext {
         followingBusReference = requireNonBlank(followingBusReference, "followingBusReference");
@@ -36,6 +38,9 @@ public record ValidatedMitigationContext(
             throw new IllegalArgumentException("Current prediction gaps must match the ordered affected buses");
         }
         approvedControlStopCode = requireNonBlank(approvedControlStopCode, "approvedControlStopCode");
+        if ((approvedControlStopSequence == null) != (controlPredictionId == null)
+                || approvedControlStopSequence != null && approvedControlStopSequence < 1)
+            throw new IllegalArgumentException("A projected control stop must retain its sequence and prediction identity");
         Objects.requireNonNull(followingBusState, "followingBusState is required");
         if (maximumHoldSeconds < 0 || maximumDwellAdjustmentSeconds < 0) {
             throw new IllegalArgumentException("maximum adjustment seconds must not be negative");
@@ -46,6 +51,16 @@ public record ValidatedMitigationContext(
         if (evidenceIds.isEmpty()) {
             throw new IllegalArgumentException("evidenceIds must not be empty");
         }
+    }
+
+    public ValidatedMitigationContext(String followingBusReference, List<String> affectedBusReferences,
+            String approvedControlStopCode, FollowingBusState followingBusState, int maximumHoldSeconds,
+            int maximumDwellAdjustmentSeconds, CrowdSafetyStatus crowdSafetyStatus,
+            MitigationValidationStatus validationStatus, List<String> evidenceIds, List<Long> currentPredictionGaps,
+            Instant predictionValidUntil) {
+        this(followingBusReference, affectedBusReferences, approvedControlStopCode, followingBusState, maximumHoldSeconds,
+                maximumDwellAdjustmentSeconds, crowdSafetyStatus, validationStatus, evidenceIds, currentPredictionGaps,
+                predictionValidUntil, null, null);
     }
 
     public ValidatedMitigationContext(String followingBusReference, List<String> affectedBusReferences,

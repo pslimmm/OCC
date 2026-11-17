@@ -156,12 +156,16 @@ public class DiagnosisRequestService {
                 && existing.producer().equals(producer) && existing.schemaVersion().equals(SCHEMA_VERSION);
     }
 
-    public List<UUID> claimDueRequests(int batchSize, Duration leaseDuration) {
-        return persistence.claimDueRequests(batchSize, leaseDuration);
+    public List<UUID> claimDueBunchingDiagnoses(int batchSize, Duration leaseDuration, boolean autoProcessBunching) {
+        return persistence.claimDueBunchingDiagnoses(batchSize, leaseDuration, autoProcessBunching);
     }
 
-    public List<UUID> claimDueRequests(int batchSize, Duration leaseDuration, boolean includeBunching) {
-        return persistence.claimDueRequests(batchSize, leaseDuration, includeBunching);
+    public List<UUID> claimDueHazards(int batchSize, Duration leaseDuration) {
+        return persistence.claimDueHazards(batchSize, leaseDuration);
+    }
+
+    public List<UUID> claimDueSimulationCautions(int batchSize, Duration leaseDuration, PlanningScope scope) {
+        return persistence.claimDueSimulationCautions(batchSize, leaseDuration, scope);
     }
 
     public static final class UnsupportedEventTypeException extends RuntimeException {

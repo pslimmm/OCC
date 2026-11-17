@@ -70,8 +70,9 @@ class HazardAdvisoryProcessorTest {
                 new AdvisoryContextPort.Progress("S5", 5, NOW, 30, List.of(5), List.of(300)));
         when(context.hazard(disruptionId)).thenReturn(hazard);
         when(context.fleet(currentRunId)).thenReturn(new AdvisoryContextPort.Fleet(currentRunId, "RUNNING", List.of(bus), 1));
-        when(context.limits()).thenReturn(new AdvisoryContextPort.Limits(10, 900, 10, Duration.ofMinutes(5), Duration.ofHours(12)));
-        when(drafts.propose(hazard, bus)).thenReturn(new AdvisoryDraftPort.Result(
+        var limits = new AdvisoryContextPort.Limits(10, 900, 10, Duration.ofMinutes(5), Duration.ofHours(12));
+        when(context.limits()).thenReturn(limits);
+        when(drafts.propose(hazard, bus, limits)).thenReturn(new AdvisoryDraftPort.Result(
                 new AdvisoryCandidate(InstructionType.BE_CAUTIOUS,
                         new InstructionParameters("S6", "Harbor Road", 6, null, null, null), "Near reported flood"),
                 "synthetic", "input", "output"));

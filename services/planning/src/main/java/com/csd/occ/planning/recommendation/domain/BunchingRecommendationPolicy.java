@@ -80,11 +80,11 @@ public final class BunchingRecommendationPolicy {
                 outcomes.add(new SuggestedBusOutcome(bus, null, 0, "An adjacent gap needs manual review."));
                 continue;
             }
-            long gap = group.adjacentGapSeconds().get(index - 1);
+            long gap = group.controlGapSeconds().get(index - 1);
             outcomes.add(suggestOutcome(bus, expectedHeadway - gap, group, fleet, route, now));
         }
         int recoveryTarget = Math.min(expectedHeadway, SIMULATION_RECOVERY_GAP_SECONDS);
-        var gaps = group.adjacentGapSeconds();
+        var gaps = group.controlGapSeconds();
         var delays = new int[buses.size()];
         // A bus that cannot take a timed action fixes the boundary of an adjustable run.
         for (int start = 1; start < outcomes.size(); ) {
@@ -146,18 +146,31 @@ public final class BunchingRecommendationPolicy {
         var bus = matches.getFirst();
         if (bus.captainUserId() == null || !"ASSIGNED".equals(bus.assignmentStatus()))
             return new SuggestedBusOutcome(busId, null, 0, "No captain is assigned to this bus.");
+        var projection = group.controlPrediction();
+        if (projection != null) {
+            if (route == null || route.nextStop(bus, projection.stopCode(), projection.stopSequence()).isEmpty()
+                    || !projection.isApproaching(bus, now))
+                return new SuggestedBusOutcome(busId, null, 0, "The reviewed control stop is not the bus's verified next stop.");
+            return new SuggestedBusOutcome(busId, MitigationType.HOLD,
+                    (int) Math.min(deficit, SIMULATION_MAXIMUM_HOLD_SECONDS), null);
+        }
         var progress = bus.progress();
         if (progress == null || !group.fetchedAt().equals(progress.observedAt()))
             return new SuggestedBusOutcome(busId, null, 0, "Bus progress for the reviewed snapshot is unavailable.");
-        var stop = route == null || !group.serviceId().equals(route.serviceId()) ? Optional.<AdvisoryContextPort.Stop>empty()
-                : route.upcomingStop(group.directionId(), group.stopCode(), progress.stopSequence());
-        if (stop.isEmpty())
+        if (route == null || !group.serviceId().equals(route.serviceId()))
             return new SuggestedBusOutcome(busId, null, 0, "The upcoming control stop is unavailable or ambiguous.");
-        if (progress.isBoardingAt(stop.orElseThrow(), group, now))
+        if (progress.isApproachingAt(now)) {
+            if (bus.nextStopSequence() == null)
+                return new SuggestedBusOutcome(busId, null, 0, "The bus's next stop is unavailable.");
+            if (route.nextPredictedStop(bus, group.stopCode()).isEmpty())
+                return new SuggestedBusOutcome(busId, null, 0, "The reviewed control stop is not the bus's verified next stop.");
+            return new SuggestedBusOutcome(busId, MitigationType.HOLD,
+                    (int) Math.min(deficit, SIMULATION_MAXIMUM_HOLD_SECONDS), null);
+        }
+        var stop = route.upcomingStop(group.directionId(), group.stopCode(), progress.stopSequence());
+        if (stop.isPresent() && progress.isBoardingAt(stop.orElseThrow(), group, now))
             return new SuggestedBusOutcome(busId, MitigationType.DWELL_ADJUSTMENT,
                     (int) Math.min(deficit, SIMULATION_MAXIMUM_DWELL_SECONDS), null);
-        if (progress.isApproachingAt(now))
-            return new SuggestedBusOutcome(busId, MitigationType.HOLD, (int) Math.min(deficit, SIMULATION_MAXIMUM_HOLD_SECONDS), null);
         return new SuggestedBusOutcome(busId, null, 0, "The bus has no fresh approaching or boarding evidence.");
     }
 

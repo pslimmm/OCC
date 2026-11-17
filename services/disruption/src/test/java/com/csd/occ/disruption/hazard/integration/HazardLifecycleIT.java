@@ -531,7 +531,7 @@ class HazardLifecycleIT {
     }
 
     @Test
-    void exposedDemoBusProgressCreatesDurableReassessmentOnlyOncePerEvidenceAndProgress() {
+    void demoBusReassessmentDeduplicatesUnchangedAffectedStopsAndQueuesNewEvidenceAndTargets() {
         var runId = UUID.randomUUID();
         process("FLOOD", poll("FLOOD", NOW, "SUCCESS", true, null,
                 List.of(fact("FLOOD", "reassessed-source", "OBSERVED", null, null, List.of()))));
@@ -540,26 +540,45 @@ class HazardLifecycleIT {
         when(transit.associationRadiusKm()).thenReturn(1.0);
         when(transit.route("190")).thenReturn(new HazardTransitPort.Route("190", List.of(
                 new HazardTransitPort.Operator("Operator", List.of(new HazardTransitPort.Direction(1, List.of(
-                        new HazardTransitPort.Stop("44251", "Demo Road", "Demo Road", null, null, 10))))))));
+                        new HazardTransitPort.Stop("44251", "Demo Road", "Demo Road", null, null, 10),
+                        new HazardTransitPort.Stop("44231", "Demo Road", "Demo Road", null, null, 12))))))));
         when(transit.fleet(org.mockito.ArgumentMatchers.eq(runId), org.mockito.ArgumentMatchers.anyInt()))
-                .thenAnswer(invocation -> fleet(runId, 5));
+                .thenReturn(fleet(runId, 13));
 
+        assertThat(reassessment.enqueueExposedBuses()).isZero();
+        when(transit.fleet(runId, 0)).thenReturn(fleet(runId, 5));
         assertThat(reassessment.enqueueExposedBuses()).isEqualTo(1);
+        assertThat(reassessment.enqueueExposedBuses()).isZero();
+        when(transit.fleet(runId, 0)).thenReturn(fleet(runId, 6));
         assertThat(reassessment.enqueueExposedBuses()).isZero();
         assertThat(count("disruption_event")).isEqualTo(2);
         assertThat(count("planning_outbox")).isEqualTo(2);
 
-        when(transit.fleet(org.mockito.ArgumentMatchers.eq(runId), org.mockito.ArgumentMatchers.anyInt()))
-                .thenAnswer(invocation -> fleet(runId, 6));
+        when(transit.fleet(runId, 0)).thenReturn(fleet(runId, 11));
         assertThat(reassessment.enqueueExposedBuses()).isEqualTo(1);
+        when(transit.fleet(runId, 0)).thenReturn(fleet(runId, 12));
+        assertThat(reassessment.enqueueExposedBuses()).isZero();
+        when(transit.fleet(runId, 0)).thenReturn(fleet(runId, 13));
+        assertThat(reassessment.enqueueExposedBuses()).isZero();
         assertThat(count("disruption_event")).isEqualTo(3);
         assertThat(count("planning_outbox")).isEqualTo(3);
+
+        when(transit.fleet(runId, 0)).thenReturn(fleet(runId, 5));
+        assertThat(reassessment.enqueueExposedBuses()).isZero();
+
+        clock.set(NOW.plusSeconds(1));
+        process("FLOOD", poll("FLOOD", clock.instant(), "SUCCESS", true, null,
+                List.of(fact("FLOOD", "reassessed-source", "OBSERVED", null, NOW.plusSeconds(60), List.of()))));
+        assertThat(reassessment.enqueueExposedBuses()).isEqualTo(1);
+        assertThat(reassessment.enqueueExposedBuses()).isZero();
+        assertThat(count("disruption_event")).isEqualTo(5);
+        assertThat(count("planning_outbox")).isEqualTo(5);
 
         var reassessmentEvents = jdbc.query("""
                 SELECT id::text, evidence->'hazardSnapshot'->>'targetBusId' AS bus_id
                 FROM disruption.disruption_event WHERE action='REASSESSED' ORDER BY id
                 """, (rs, row) -> rs.getString("id") + ":" + rs.getString("bus_id"));
-        assertThat(reassessmentEvents).hasSize(2);
+        assertThat(reassessmentEvents).hasSize(3);
         assertThat(reassessmentEvents).allSatisfy(event -> assertThat(event).contains("demo-190-b"));
         assertThat(reassessmentEvents).doesNotHaveDuplicates();
         assertThat(jdbc.queryForList("SELECT payload_json FROM disruption.planning_outbox WHERE event_id IN "
@@ -568,10 +587,9 @@ class HazardLifecycleIT {
                         "\"targetBusId\":\"demo-190-b\"", "\"targetRunId\":\"" + runId + "\""));
     }
 
-    private HazardTransitPort.Fleet fleet(UUID runId, int progressSequence) {
+    private HazardTransitPort.Fleet fleet(UUID runId, int nextStopSequence) {
         return new HazardTransitPort.Fleet(runId, "ACTIVE", List.of(new HazardTransitPort.Bus("demo-190-b", "trip-1",
-                "SYNTHETIC", "190", 1, null, "ASSIGNED", new HazardTransitPort.Progress("44251",
-                progressSequence, NOW, 40, List.of(), List.of()))), 1, 0, 100);
+                "SYNTHETIC", "190", 1, null, "ASSIGNED", nextStopSequence)), 1, 0, 100);
     }
 
     private void process(String kind, HazardPollPort.Poll poll) {

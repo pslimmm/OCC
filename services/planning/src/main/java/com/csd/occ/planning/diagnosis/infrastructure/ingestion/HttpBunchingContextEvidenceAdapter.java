@@ -7,6 +7,7 @@ import com.csd.occ.planning.diagnosis.domain.DiagnosisFailureException;
 import com.csd.occ.planning.diagnosis.domain.EvidenceLimitExceededException;
 import com.csd.occ.planning.diagnosis.domain.IncidentEvidence;
 import com.csd.occ.planning.diagnosis.domain.RootCauseContext;
+import com.csd.occ.planning.diagnosis.domain.SimulationDelayEvidence;
 import com.csd.occ.planning.diagnosis.infrastructure.http.PeerResponseLimitExceededException;
 import java.util.List;
 import java.util.UUID;
@@ -45,7 +46,7 @@ public class HttpBunchingContextEvidenceAdapter implements ContextEvidencePort {
             if (!requestedIds.equals(returnedIds))
                 throw new DiagnosisFailureException("EVIDENCE_OBSERVATION_SET_MISMATCH", false);
             return new RootCauseContext(result.classification(), result.demoRunId(), result.referenceVersionId(),
-                    result.arrivals(), result.incidents(), result.missingFields());
+                    result.arrivals(), result.incidents(), result.missingFields(), result.simulationDelay());
         } catch (RestClientResponseException failure) {
             int status = failure.getStatusCode().value();
             throw new DiagnosisFailureException("CONTEXT_HTTP_" + status,
@@ -69,5 +70,5 @@ public class HttpBunchingContextEvidenceAdapter implements ContextEvidencePort {
 
     private record ContextResponse(String classification, UUID demoRunId, UUID referenceVersionId,
                                    List<ArrivalEvidence> arrivals, List<IncidentEvidence> incidents,
-                                   List<String> missingFields) { }
+                                   List<String> missingFields, SimulationDelayEvidence simulationDelay) { }
 }

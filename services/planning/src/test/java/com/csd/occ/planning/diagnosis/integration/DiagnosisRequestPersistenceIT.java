@@ -8,6 +8,7 @@ import com.csd.occ.planning.diagnosis.domain.DiagnosisRequest;
 import com.csd.occ.planning.diagnosis.domain.DiagnosisRequestService;
 import com.csd.occ.planning.diagnosis.domain.DiagnosisRequestPersistenceService;
 import com.csd.occ.planning.diagnosis.domain.EventType;
+import com.csd.occ.planning.diagnosis.domain.PlanningScope;
 import com.csd.occ.planning.diagnosis.domain.BunchingEventFacts;
 import com.csd.occ.planning.diagnosis.domain.EvidenceSnapshot;
 import com.csd.occ.planning.diagnosis.domain.EventSubmissionFingerprintPort;
@@ -38,6 +39,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
@@ -490,11 +493,11 @@ class DiagnosisRequestPersistenceIT {
     void expiredProcessingLeaseIsReclaimedAndAttemptCountAdvances() {
         UUID key = UUID.randomUUID();
         requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), key);
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1))).containsExactly(key);
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), true)).containsExactly(key);
         jdbc.update("update planning.planning_request set lease_until = ? where id = ?",
                 java.sql.Timestamp.from(NOW.minusSeconds(1)), key);
 
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1))).containsExactly(key);
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), true)).containsExactly(key);
         assertThat(repository.findById(key).orElseThrow().attemptCount()).isEqualTo(2);
     }
 
@@ -508,7 +511,7 @@ class DiagnosisRequestPersistenceIT {
         var claim = (java.util.concurrent.Callable<List<UUID>>) () -> {
             ready.countDown();
             if (!start.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("claimers did not synchronize");
-            return requests.claimDueRequests(10, Duration.ofMinutes(1));
+            return requests.claimDueBunchingDiagnoses(10, Duration.ofMinutes(1), true);
         };
 
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -526,7 +529,7 @@ class DiagnosisRequestPersistenceIT {
     void completionAtomicallyPersistsDiagnosisInvocationAndDeliveryAndIgnoresReplay() {
         UUID requestId = UUID.randomUUID();
         var request = requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), requestId);
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1))).containsExactly(requestId);
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), true)).containsExactly(requestId);
         RootCauseDiagnosis diagnosis = diagnosis(requestId, "synthetic-model");
         UUID deliveryId = UUID.randomUUID();
 
@@ -557,7 +560,7 @@ class DiagnosisRequestPersistenceIT {
     void liveAdvisoryCompletionPersistsDiagnosisAndInvocationWithoutDeliveryAndIgnoresReplay() {
         UUID requestId = UUID.randomUUID();
         requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), requestId);
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1))).containsExactly(requestId);
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), true)).containsExactly(requestId);
         RootCauseDiagnosis diagnosis = new RootCauseDiagnosis(UUID.randomUUID(), requestId, "UNKNOWN", null,
                 "Available evidence is insufficient.", 0.0, 0.0, List.of("evidence-1"), List.of(),
                 new ConfidenceComponents(1, 0, 0, 0, 0),
@@ -587,7 +590,7 @@ class DiagnosisRequestPersistenceIT {
     void evidenceOnlyDiagnosisKeepsLegacyScoreColumnsReadableForRollback() {
         UUID requestId = UUID.randomUUID();
         requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), requestId);
-        requests.claimDueRequests(1, Duration.ofMinutes(1));
+        requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), true);
         var diagnosis = new RootCauseDiagnosis(UUID.randomUUID(), requestId, "UNKNOWN", null,
                 "Available evidence is insufficient.", null, null, List.of("evidence-1"), List.of(), null,
                 "{}", "evidence-hash", "GOOGLE_GENAI", "synthetic-model", "prompt-v1", "schema-v1", NOW);
@@ -610,7 +613,7 @@ class DiagnosisRequestPersistenceIT {
     void databaseConstraintFailureRollsBackDiagnosisInvocationDeliveryAndRequestTransition() {
         UUID requestId = UUID.randomUUID();
         requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), requestId);
-        requests.claimDueRequests(1, Duration.ofMinutes(1));
+        requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), true);
         RootCauseDiagnosis diagnosis = diagnosis(requestId, "synthetic-model");
 
         assertThatThrownBy(() -> completion.complete(requestId, diagnosis,
@@ -674,7 +677,7 @@ class DiagnosisRequestPersistenceIT {
     @Test void failedAttemptRetainsInputAndActualResponseWithoutAnEvidenceHashOrResult() {
         UUID requestId = UUID.randomUUID();
         requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), requestId);
-        requests.claimDueRequests(1, Duration.ofMinutes(1));
+        requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), true);
         var details = new ModelInvocationDetails("GOOGLE_GENAI", "synthetic-model", "response-1", "prompt-v1", "schema-v1",
                 NOW, NOW, 0, 1, 1, 2, "INVALID", null, 1, "{\"evidence\":true}", "{invalid-json");
         completion.fail(requestId, "MODEL_OUTPUT_INVALID", false, false, NOW, List.of(details), null);
@@ -686,12 +689,71 @@ class DiagnosisRequestPersistenceIT {
     }
 
     @Test
-    void claimDueRequestsWhenIncludeBunchingIsFalseSkipsBunchingRequests() {
+    void unrequestedBunchingRemainsPendingUntilAutomaticProcessingIsEnabled() {
         requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), UUID.randomUUID());
-        var claimed = requests.claimDueRequests(10, Duration.ofMinutes(1), false);
+        var claimed = requests.claimDueBunchingDiagnoses(10, Duration.ofMinutes(1), false);
         assertThat(claimed).isEmpty();
-        var claimedWithBunching = requests.claimDueRequests(10, Duration.ofMinutes(1), true);
+        var claimedWithBunching = requests.claimDueBunchingDiagnoses(10, Duration.ofMinutes(1), true);
         assertThat(claimedWithBunching).hasSize(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void controllerRequestedBunchingIsClaimedWhileRoadworksIsProcessing(boolean autoProcessBunching) {
+        var lease = Duration.ofMinutes(1);
+        var roadworks = queueHazard("ROADWORKS", "SIMULATION", UUID.randomUUID(), "OPENED", NOW.minusSeconds(30));
+        var automatic = requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), UUID.randomUUID()).id();
+        jdbc.update("update planning.planning_request set created_at=? where id=?",
+                java.sql.Timestamp.from(NOW.minusSeconds(10)), automatic);
+        var requested = requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), UUID.randomUUID()).id();
+        triggers.trigger(requested);
+
+        assertThat(requests.claimDueHazards(2, lease)).containsExactly(roadworks);
+        assertThat(requests.claimDueBunchingDiagnoses(1, lease, autoProcessBunching)).containsExactly(requested);
+        assertThat(repository.findById(roadworks).orElseThrow().status()).isEqualTo(DiagnosisRequestStatus.PROCESSING);
+
+        jdbc.update("update planning.planning_request set lease_until=? where id=?",
+                java.sql.Timestamp.from(NOW.minusSeconds(1)), roadworks);
+        assertThat(requests.claimDueBunchingDiagnoses(2, lease, autoProcessBunching))
+                .containsExactlyElementsOf(autoProcessBunching ? List.of(automatic) : List.of());
+        assertThat(requests.claimDueHazards(2, lease)).containsExactly(roadworks);
+        assertThat(repository.findById(roadworks).orElseThrow().attemptCount()).isEqualTo(2);
+    }
+
+    @Test
+    void simulationCautionsUseADisjointQueueAndClaimTheActiveRunSourceBeforeReassessments() {
+        var runId = UUID.randomUUID();
+        var scope = new PlanningScope("DEMO", runId);
+        var oldRunFlood = queueHazard("FLOOD", "SIMULATION", UUID.randomUUID(), "UPDATED", NOW.minusSeconds(1));
+        var reassessment = queueHazard("FLOOD", "SIMULATION", runId, "REASSESSED", NOW.minusSeconds(2));
+        var olderFlood = queueHazard("FLOOD", "SIMULATION", runId, "OPENED", NOW.minusSeconds(10));
+        var latestFlood = queueHazard("FLOOD", "SIMULATION", runId, "UPDATED", NOW.minusSeconds(4));
+        var rail = queueHazard("RAIL_DISRUPTION", "SIMULATION", runId, "OPENED", NOW.minusSeconds(6));
+        var roadworks = queueHazard("ROADWORKS", "SIMULATION", runId, "OPENED", NOW.minusSeconds(20));
+        var liveFlood = queueHazard("FLOOD", "OBSERVATION_ONLY", null, "OPENED", NOW.minusSeconds(15));
+
+        assertThat(requests.claimDueHazards(1, Duration.ofMinutes(1))).containsExactly(roadworks);
+        assertThat(requests.claimDueHazards(10, Duration.ofMinutes(1))).containsExactly(liveFlood);
+        assertThat(requests.claimDueBunchingDiagnoses(10, Duration.ofMinutes(1), true)).isEmpty();
+        assertThat(requests.claimDueSimulationCautions(10, Duration.ofMinutes(1), scope))
+                .containsExactly(latestFlood, rail, olderFlood, reassessment, oldRunFlood);
+        assertThat(requests.claimDueSimulationCautions(10, Duration.ofMinutes(1), scope)).isEmpty();
+        jdbc.update("update planning.planning_request set lease_until = ? where id = ?",
+                java.sql.Timestamp.from(NOW.minusSeconds(1)), latestFlood);
+        assertThat(requests.claimDueHazards(10, Duration.ofMinutes(1))).isEmpty();
+        assertThat(requests.claimDueBunchingDiagnoses(10, Duration.ofMinutes(1), true)).isEmpty();
+        assertThat(requests.claimDueSimulationCautions(10, Duration.ofMinutes(1), scope)).containsExactly(latestFlood);
+    }
+
+    private UUID queueHazard(String kind, String classification, UUID runId, String action, Instant at) {
+        var id = UUID.randomUUID();
+        var request = new DiagnosisRequest(id, EventType.HAZARD, PRODUCER, UUID.randomUUID(),
+                DiagnosisRequestService.SCHEMA_VERSION, at);
+        request.retainInput("""
+                {"classification":"%s","demoRunId":"%s","hazardSnapshot":{"action":"%s","facts":{"kind":"%s"}}}
+                """.formatted(classification, runId == null ? "" : runId, action, kind));
+        repository.saveAndFlush(request);
+        return id;
     }
 
     @Test
@@ -700,17 +762,17 @@ class DiagnosisRequestPersistenceIT {
         requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), id);
         assertThat(triggers.trigger(id).status()).isEqualTo(DiagnosisRequestStatus.PENDING);
         assertThat(repository.findById(id).orElseThrow().isProcessingRequested()).isTrue();
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1), false)).containsExactly(id);
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), false)).containsExactly(id);
 
         var first = repository.findById(id).orElseThrow();
         triggers.trigger(id);
         assertThat(repository.findById(id).orElseThrow().leaseUntil()).isEqualTo(first.leaseUntil());
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1), false)).isEmpty();
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), false)).isEmpty();
 
         // An older instance can start work during rollout without setting the new marker.
         jdbc.update("update planning.planning_request set lease_until=?, processing_requested=false where id=?",
                 java.sql.Timestamp.from(NOW.minusSeconds(1)), id);
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1), false)).containsExactly(id);
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), false)).containsExactly(id);
         assertThat(repository.findById(id).orElseThrow().attemptCount()).isEqualTo(2);
         assertThat(repository.findById(id).orElseThrow().isProcessingRequested()).isTrue();
     }
@@ -720,14 +782,14 @@ class DiagnosisRequestPersistenceIT {
         UUID id = UUID.randomUUID();
         requests.enqueue(EventType.BUS_BUNCHING, PRODUCER, UUID.randomUUID(), id);
         triggers.trigger(id);
-        requests.claimDueRequests(1, Duration.ofMinutes(1), false);
+        requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), false);
         completion.fail(id, "MODEL_PROVIDER_FAILURE", true, true, NOW.plusSeconds(30), List.of(), null);
 
         assertThat(triggers.trigger(id).status()).isEqualTo(DiagnosisRequestStatus.FAILED_RETRYABLE);
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1), false)).isEmpty();
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), false)).isEmpty();
         jdbc.update("update planning.planning_request set next_attempt_at=? where id=?",
                 java.sql.Timestamp.from(NOW), id);
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1), false)).containsExactly(id);
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), false)).containsExactly(id);
         assertThat(repository.findById(id).orElseThrow().attemptCount()).isEqualTo(2);
     }
 
@@ -755,9 +817,9 @@ class DiagnosisRequestPersistenceIT {
             assertThat(second.get(10, TimeUnit.SECONDS).status()).isEqualTo(DiagnosisRequestStatus.PENDING);
         }
         assertThat(repository.findById(id).orElseThrow().attemptCount()).isZero();
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1), false)).containsExactly(id);
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), false)).containsExactly(id);
         triggers.triggerByEvent(eventId);
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(1), false)).isEmpty();
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(1), false)).isEmpty();
         assertThat(repository.findById(id).orElseThrow().attemptCount()).isEqualTo(1);
     }
 

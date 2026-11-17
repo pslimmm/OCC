@@ -3,7 +3,10 @@ package com.csd.occ.ingestion.domain;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
+import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -17,7 +20,8 @@ class DemoFleetServiceTest {
     private final BusArrivalObservationRepository arrivals = mock(BusArrivalObservationRepository.class);
     private final ReferenceTopologyPort topology = mock(ReferenceTopologyPort.class);
     private final PollingConfigurationPort polling = mock(PollingConfigurationPort.class);
-    private final DemoFleetService fleet = new DemoFleetService(runs, assignments, arrivals, topology, polling);
+    private final DemoFleetService fleet = new DemoFleetService(runs, assignments, arrivals, topology, polling,
+            new DemoRoutePositionService(runs, assignments, topology, Clock.fixed(Instant.EPOCH.plusSeconds(5), ZoneOffset.UTC)));
 
     @Test
     void exposesOnlyActiveRunAssignmentsWithExplicitUnavailableProgress() {
@@ -36,7 +40,10 @@ class DemoFleetServiceTest {
         assertThat(result.demoRunId()).isEqualTo(runId);
         assertThat(result.items().getLast().captainUserId()).contains(captain);
         assertThat(result.items().getFirst().assignmentStatus()).isEqualTo("CAPTAIN_ASSIGNMENT_UNAVAILABLE");
-        assertThat(result.items()).allSatisfy(bus -> assertThat(bus.progress()).isEmpty());
+        assertThat(result.items()).allSatisfy(bus -> {
+            assertThat(bus.progress()).isEmpty();
+            assertThat(bus.nextStopSequence()).isNull();
+        });
         run.close(Instant.EPOCH.plusSeconds(1));
         assertThat(fleet.find(runId, 0, 20).items()).isEmpty();
         verify(assignments, times(1)).findByIdDemoRunIdOrderByBusId(any(), any());
@@ -53,7 +60,7 @@ class DemoFleetServiceTest {
         UUID runId = UUID.randomUUID();
         DemoRun run = new DemoRun(runId, Instant.EPOCH, "multi-route-bunching-v2", 190);
         run.startReplay();
-        var assignment = new DemoVehicleAssignment(new DemoVehicleAssignmentId(runId, "demo-190-a"),
+        var assignment = new DemoVehicleAssignment(new DemoVehicleAssignmentId(runId, "demo-190-1"),
                 "190", 1, "SBS8027Y", "SBST", "DD", "DEMO-CAPTAIN");
         var arrival = new BusArrivalObservation();
         arrival.setReferenceVersionId(UUID.randomUUID());
@@ -65,21 +72,26 @@ class DemoFleetServiceTest {
         var route = new ReferenceTopologyPort.BusRoute("190", List.of(
                 new ReferenceTopologyPort.BusRouteOperator("SBST", "DD", List.of(
                         new ReferenceTopologyPort.BusRouteDirection(1, List.of(
-                                new ReferenceTopologyPort.BusRouteStop("44251", "A", "Stop A", null, null, 10, null),
-                                new ReferenceTopologyPort.BusRouteStop("12345", "B", "Stop B", null, null, 20, null),
-                                new ReferenceTopologyPort.BusRouteStop("44251", "A", "Stop A", null, null, 40, null)))))));
+                                new ReferenceTopologyPort.BusRouteStop("44251", "A", "Stop A", new BigDecimal("1.38"), new BigDecimal("103.77"), 10, null),
+                                new ReferenceTopologyPort.BusRouteStop("12345", "B", "Stop B", new BigDecimal("1.39"), new BigDecimal("103.78"), 20, null),
+                                new ReferenceTopologyPort.BusRouteStop("44251", "A", "Stop A", new BigDecimal("1.38"), new BigDecimal("103.77"), 40, null)))))));
         when(runs.findById(runId)).thenReturn(Optional.of(run));
         when(assignments.findByIdDemoRunIdOrderByBusId(runId, PageRequest.of(0, 20)))
                 .thenReturn(new PageImpl<>(List.of(assignment)));
         when(arrivals.findFirstByDemoRunIdAndTripIdAndClassificationOrderByFetchedAtDescIdDesc(
                 runId, assignment.id().tripId(), "SIMULATION")).thenReturn(Optional.of(arrival));
+        when(topology.activeVersion()).thenReturn(Optional.of(new ReferenceTopologyPort.ReferenceTopologyVersion(
+                arrival.getReferenceVersionId(), "checksum")));
         when(topology.busRoute(arrival.getReferenceVersionId(), "190")).thenReturn(Optional.of(route));
 
         var result = fleet.find(runId, 0, 20);
 
+        assertThat(result.items().getFirst().nextStopSequence()).isEqualTo(20);
         assertThat(result.items().getFirst().progress()).get().satisfies(progress -> {
             assertThat(progress.stopCode()).isEqualTo("44251");
             assertThat(progress.stopSequence()).isEqualTo(40);
+            assertThat(progress.assumedSpeedKmh()).isEqualTo(10);
+            assertThat(progress.allowedSpeedReductionsKmh()).containsExactly(5);
             assertThat(progress.estimatedArrivalAt()).isEqualTo(Instant.EPOCH.plusSeconds(60));
             assertThat(progress.freshUntil()).isEqualTo(Instant.EPOCH.plusSeconds(125));
             assertThat(progress.boardingUntil()).isEqualTo(Instant.EPOCH.plusSeconds(120));

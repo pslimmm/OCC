@@ -20,7 +20,8 @@ public record StartDemoRunRequest(
         @Min(15) @Max(900) @Schema(description = "Seconds between successive simulated dispatches", example = "90") Integer dispatchGapSeconds,
         @Schema(description = "Optional gap in seconds after each bus. Supply one value for each adjacent bus pair; omitted values use dispatchGapSeconds.", example = "[120, 90]") List<@Min(15) @Max(900) Integer> busGapsSeconds,
         @NotBlank @Size(max = 20) @Schema(description = "The single route stop at which this bunching injection is created", example = "44251") String monitoredStopCode,
-        @NotNull @Schema(example = "BUNCHING") DemoScenario scenario,
+        @NotNull @Schema(description = "Normal operation or bus bunching", allowableValues = {"NORMAL", "BUNCHING"},
+                example = "BUNCHING") DemoScenario scenario,
         @Schema(description = "One distinct Supabase captain user ID per bus. Omit to use legacy demo assignment settings.") List<UUID> captainUserIds) {
 
     @JsonIgnore

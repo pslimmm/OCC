@@ -12,6 +12,9 @@ import org.hibernate.type.SqlTypes;
 @Entity
 @Table(name = "demo_run", schema = "ingestion")
 public class DemoRun {
+    private static final String ROADWORKS_SCENARIO_KEY = "roadworks-bunching";
+    private static final String ROADWORKS_SCENARIO_VERSION = "v1";
+
     protected DemoRun() {}
     public DemoRun(UUID id, Instant startedAt, String scenario, long seed) {
         this(id, startedAt, scenario, seed, DemoRunConfiguration.defaults());
@@ -19,14 +22,16 @@ public class DemoRun {
     public DemoRun(UUID id, Instant startedAt, String scenario, long seed, DemoRunConfiguration configuration) {
         this.id = id;
         int versionSeparator = scenario.lastIndexOf("-v");
-        scenarioKey = scenario.substring(0, versionSeparator);
-        scenarioVersion = scenario.substring(versionSeparator + 1);
+        boolean roadworks = configuration.scenario() == DemoScenario.ROADWORKS_BUNCHING;
+        scenarioKey = roadworks ? ROADWORKS_SCENARIO_KEY : scenario.substring(0, versionSeparator);
+        scenarioVersion = roadworks ? ROADWORKS_SCENARIO_VERSION : scenario.substring(versionSeparator + 1);
         this.seed = seed;
         serviceId = configuration.serviceId(); directionId = (short) configuration.directionId();
         busCount = (short) configuration.busCount(); dispatchGapSeconds = configuration.dispatchGap().toSeconds();
         busGapSeconds = configuration.busGaps().stream().map(java.time.Duration::toSeconds).toList();
         monitoredStopCode = configuration.monitoredStopCode();
-        simulationScenario = configuration.scenario().name();
+        // Retain the storage value that previous application versions can read.
+        simulationScenario = roadworks ? DemoScenario.BUNCHING.name() : configuration.scenario().name();
         status = "PREPARING"; currentStep = 0; this.startedAt = startedAt; classification = "SIMULATION";
     }
     @Id private UUID id;
@@ -57,9 +62,12 @@ public class DemoRun {
         List<java.time.Duration> gaps = busGapSeconds == null ? java.util.stream.IntStream.range(1, busCount)
                 .mapToObj(ignored -> java.time.Duration.ofSeconds(dispatchGapSeconds)).toList()
                 : busGapSeconds.stream().map(java.time.Duration::ofSeconds).toList();
+        var scenario = ROADWORKS_SCENARIO_KEY.equals(scenarioKey) && ROADWORKS_SCENARIO_VERSION.equals(scenarioVersion)
+                ? DemoScenario.ROADWORKS_BUNCHING
+                : DemoScenario.valueOf(simulationScenario);
         return new DemoRunConfiguration(serviceId, directionId, busCount, java.time.Duration.ofSeconds(dispatchGapSeconds), gaps,
                 monitoredStopCode == null ? "44251" : monitoredStopCode,
-                DemoScenario.valueOf(simulationScenario));
+                scenario);
     }
     public boolean expiredAt(Instant cutoff) {
         return "CLOSED".equals(status) && closedAt != null && closedAt.isBefore(cutoff)

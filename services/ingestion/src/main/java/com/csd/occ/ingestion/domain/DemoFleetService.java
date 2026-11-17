@@ -14,10 +14,13 @@ public class DemoFleetService {
     private final BusArrivalObservationRepository arrivals;
     private final ReferenceTopologyPort topology;
     private final PollingConfigurationPort polling;
+    private final DemoRoutePositionService positions;
 
     public DemoFleetService(DemoRunRepository runs, DemoVehicleAssignmentRepository assignments,
-            BusArrivalObservationRepository arrivals, ReferenceTopologyPort topology, PollingConfigurationPort polling) {
+            BusArrivalObservationRepository arrivals, ReferenceTopologyPort topology, PollingConfigurationPort polling,
+            DemoRoutePositionService positions) {
         this.runs = runs; this.assignments = assignments; this.arrivals = arrivals; this.topology = topology; this.polling = polling;
+        this.positions = positions;
     }
 
     @Transactional(readOnly = true)
@@ -27,18 +30,27 @@ public class DemoFleetService {
         if (!List.of("RUNNING", "REPLAY_COMPLETE").contains(run.status()))
             return new DemoFleetSnapshot(runId, run.status(), List.of(), 0, page, size);
         var found = assignments.findByIdDemoRunIdOrderByBusId(runId, PageRequest.of(page, size));
+        var timeline = positions.timeline(run);
+        var scenario = run.configuration().scenario();
         return new DemoFleetSnapshot(runId, run.status(), found.map(assignment -> {
             var captain = assignment.captainUserId();
+            var tripId = assignment.id().tripId();
             return new DemoFleetSnapshot.Vehicle(
-                    assignment.busId() == null ? assignment.id().tripId() : assignment.busId(),
-                    assignment.id().tripId(), assignment.vehicleRegistrationNumber(), assignment.serviceId(),
+                    assignment.busId() == null ? tripId : assignment.busId(),
+                    tripId, assignment.vehicleRegistrationNumber(), assignment.serviceId(),
                     assignment.directionId(), captain, captain.isPresent() ? "ASSIGNED" : "CAPTAIN_ASSIGNMENT_UNAVAILABLE",
-                    progress(assignment), assignment.assignmentRevision());
+                    progress(assignment, scenario), timeline.map(motion -> motion.nextStopSequence(tripId)).orElse(null),
+                    assignment.assignmentRevision());
         }).toList(), found.getTotalElements(), page, size);
     }
 
     /** Latest predicted stop for one simulation bus; also used for the captain route view. */
     public Optional<DemoFleetSnapshot.Progress> progress(DemoVehicleAssignment assignment) {
+        return progress(assignment, runs.findById(assignment.id().demoRunId()).map(run -> run.configuration().scenario())
+                .orElse(DemoScenario.BUNCHING));
+    }
+
+    private Optional<DemoFleetSnapshot.Progress> progress(DemoVehicleAssignment assignment, DemoScenario scenario) {
         return arrivals.findFirstByDemoRunIdAndTripIdAndClassificationOrderByFetchedAtDescIdDesc(
                 assignment.id().demoRunId(), assignment.id().tripId(), "SIMULATION").flatMap(arrival -> {
             var candidates = topology.busRoute(arrival.getReferenceVersionId(), assignment.serviceId()).stream()
@@ -54,7 +66,8 @@ public class DemoFleetService {
                             : candidate.stopSequence() == arrival.getRouteStopSequence())
                     .findFirst()
                     .map(stop -> new DemoFleetSnapshot.Progress(stop.stopCode(), stop.stopSequence(),
-                            arrival.getFetchedAt(), 30, List.of(5), List.of(300), eta, freshUntil,
+                            arrival.getFetchedAt(), DemoReplayScenario.cruisingSpeedKmh(scenario),
+                            List.of(scenario == DemoScenario.ROADWORKS_BUNCHING ? 2 : 5), List.of(300), eta, freshUntil,
                             eta == null || !eta.isBefore(freshUntil) ? null : DemoReplayScenario.boardingUntil(eta, freshUntil)));
         });
         // Speed values are labelled scenario assumptions, never measured vehicle telemetry.

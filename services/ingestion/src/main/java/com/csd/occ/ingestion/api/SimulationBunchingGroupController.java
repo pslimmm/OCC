@@ -3,6 +3,7 @@ package com.csd.occ.ingestion.api;
 import com.csd.occ.ingestion.api.dto.SimulationBunchingGroupResponse;
 import com.csd.occ.ingestion.domain.DemoRunService;
 import com.csd.occ.ingestion.domain.CurrentSimulationBunchingGroupService;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -46,7 +47,8 @@ public class SimulationBunchingGroupController {
     @Operation(operationId = "getCurrentSimulationBunchingGroup",
             summary = "Resolve the latest simulation bunching observations to bus identities",
             description = "Requires the planning peer capability. Returns 409 when current detector evidence is stale, "
-                    + "not the newest replay snapshot, insufficient or cannot be resolved uniquely.")
+                    + "not the newest replay snapshot, insufficient or cannot be resolved uniquely. "
+                    + "A downstream control prediction may accompany the original detection stop.")
     @ApiResponse(responseCode = "200", description = "Current affected buses in predicted arrival order")
     @ApiResponse(responseCode = "409", description = "Current bunching group cannot be established")
     public CurrentGroupResponse current(@PathVariable UUID runId, @PathVariable UUID eventId) {
@@ -58,7 +60,8 @@ public class SimulationBunchingGroupController {
     @PostMapping("/{eventId}/current")
     @Operation(operationId = "refreshCurrentSimulationBunchingGroup",
             summary = "Review current evidence or request new arrivals for an expired simulation snapshot",
-            description = "Requires the planning peer capability. Repeated requests reuse the same pending snapshot until Disruption evaluates it.",
+            description = "Requires the planning peer capability. Repeated requests reuse the same pending snapshot until "
+                    + "Disruption evaluates it. A verified downstream control prediction may accompany the original detection stop.",
             security = @SecurityRequirement(name = "OCCPeerCapability"))
     @ApiResponse(responseCode = "200", description = "Current affected buses in predicted arrival order")
     @ApiResponse(responseCode = "202", description = "New simulation predictions are awaiting detector evaluation", content = @Content)
@@ -73,15 +76,31 @@ public class SimulationBunchingGroupController {
     }
 
     private static CurrentGroupResponse response(CurrentSimulationBunchingGroupService.Group group) {
+        var prediction = group.controlPrediction();
         return new CurrentGroupResponse(group.demoRunId(), group.bunchingEventId(), group.serviceId(), group.stopCode(),
                 group.directionId(), group.rawObservationId(), group.fetchedAt(), group.validUntil(), group.affectedBusReferences(),
-                group.adjacentGapSeconds(), group.consecutivePairs());
+                group.adjacentGapSeconds(), group.consecutivePairs(), prediction == null ? null : new ControlPredictionResponse(
+                        prediction.snapshotId(), prediction.stopCode(), prediction.stopSequence(), prediction.computedAt(),
+                        prediction.arrivals().stream().map(arrival -> new ControlArrivalResponse(arrival.busReference(),
+                                arrival.arrivalAt())).toList()));
     }
 
-    public record CurrentGroupResponse(UUID demoRunId, UUID bunchingEventId, String serviceId, String stopCode,
+    public record CurrentGroupResponse(UUID demoRunId, UUID bunchingEventId, String serviceId,
+            @Schema(description = "Original detection stop code") String stopCode,
             int directionId, UUID rawObservationId, Instant fetchedAt, Instant validUntil, List<String> affectedBusReferences,
             @Schema(description = "Prediction gaps in seconds between successive affected buses, in the same order; other non-affected buses may lie between them")
             List<Long> adjacentGapSeconds,
             @Schema(description = "Whether each gap connects consecutive buses in the full simulation snapshot")
-            List<Boolean> consecutivePairs) {}
+            List<Boolean> consecutivePairs,
+            @JsonInclude(JsonInclude.Include.NON_NULL)
+            @Schema(description = "Current route-motion forecast for the trailing bus's verified next stop after the group clears the detection stop")
+            ControlPredictionResponse controlPrediction) {}
+
+    public record ControlPredictionResponse(
+            @Schema(description = "Stable identity for the source evidence, participating buses and current trip's control stop occurrence")
+            UUID snapshotId, String stopCode, int stopSequence, Instant computedAt, List<ControlArrivalResponse> arrivals) {}
+
+    public record ControlArrivalResponse(String busReference,
+            @Schema(description = "Modeled arrival on the current trip. This can be in the past for buses that have already reached this stop.")
+            Instant arrivalAt) {}
 }

@@ -73,8 +73,9 @@ stable trip IDs; always pair them with the run ID. Email and captain codes never
 authorize access. `/internal/v1/ingestion/demo-fleet?demoRunId=<uuid>&page=0&size=20`
 accepts Planning/Disruption peer capabilities and returns current assignments and
 simulation progress. Closed/preparing runs expose no current buses. Speed context
-is a synthetic fixture (30 km/h, permitted 5 km/h reduction for 300 seconds),
-not vehicle telemetry. Unresolved route occurrences have null progress.
+is a synthetic fixture. Normal and Bunching use 10 km/h cruise and permit a
+5 km/h reduction for 300 seconds. Previously saved roadworks preset runs retain
+their 5 km/h cruise and 2 km/h reduction. Unresolved route occurrences have null progress.
 
 `GET /api/v1/captain-routes/current` (CAPTAIN only) returns the bus assigned to the
 signed-in captain in the current run, matched on the token subject: its ordered
@@ -100,11 +101,14 @@ Content-Type: application/json
 Setting `enabled` to `true` starts a replay if none is active, or resumes the currently active run. Setting it to `false` first switches bunching to the live feed, then closes the active run. The persisted setting is initialized to `false` by Flyway and survives an ingestion restart. The start/close run endpoints provide equivalent control with explicit run IDs.
 
 Replay uses one fictional, deterministic bunching injection on a selected service,
-direction and stop. `POST /api/v1/demo-runs` accepts two or three buses, a chosen
+direction and stop. `POST /api/v1/demo-runs` accepts two to twenty buses, a chosen
 stop on that route direction, individual bus-pair gaps (or one default gap, 15–900
-seconds), and either `NORMAL` or `BUNCHING` scenario. Normal operation keeps the
-chosen gaps above the configured bunching threshold; Bunching starts with the chosen
-gap then reduces it on later replay steps. Each run creates stable fictional bus
+seconds), and either `NORMAL` or `BUNCHING`. Normal operation keeps the chosen gaps above
+the configured bunching threshold. Bunching starts with the given dispatch gap and then
+replays bunched arrivals. Both scenarios place roadworks at the selected stop. The rail
+disruption is at Bangkit LRT and flooding is by bus stop 44261 outside Blk 270. Planning
+receives the simulated hazards that match the selected stop and keeps their recorded
+location distinct from the bus-gap evidence. Each run creates stable fictional bus
 identities and sends repeated snapshots for that same localised event. The replay
 produces simulation-only bunching alerts and one grouped recommendation. The
 bunching consumer runs independently, so results can arrive after replay completes. Replay support requires
@@ -245,6 +249,14 @@ by any one stop snapshot, so repeated or co-located buses are not collapsed.
 `visitOrder` is only queue order at a stop and is not treated as a vehicle
 identifier. This short-range linkage is limited to the replay-validated route
 lines 190 direction 1 and 190 direction 2.
+
+An isolated coordinate beyond the short-range limit can also be linked on
+those routes when it is within 50 m both on the route and in physical distance.
+The stops on both sides must report the same three arrivals with only that
+coordinate changed. At least one neighboring stop must be polled within the
+refresh window, and the candidate ETA must agree with interpolation between the
+neighboring ETAs within the identity ETA tolerance. A skipped route marker
+number alone does not trigger a merge.
 
 When a later stop snapshot contains one compatible row after an earlier
 snapshot established multiple buses, that row is treated as a merged

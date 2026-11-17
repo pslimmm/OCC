@@ -5,7 +5,13 @@ import java.util.UUID;
 
 public record RootCauseContext(String classification, UUID demoRunId, UUID referenceVersionId,
                                List<ArrivalEvidence> arrivals, List<IncidentEvidence> incidents,
-                               List<String> missingFields) {
+                               List<String> missingFields, SimulationDelayEvidence simulationDelay) {
+    public RootCauseContext(String classification, UUID demoRunId, UUID referenceVersionId,
+                            List<ArrivalEvidence> arrivals, List<IncidentEvidence> incidents,
+                            List<String> missingFields) {
+        this(classification, demoRunId, referenceVersionId, arrivals, incidents, missingFields, null);
+    }
+
     public RootCauseContext {
         classification = EvidenceBounds.bounded(classification, 30, "classification");
         arrivals = EvidenceBounds.copy(arrivals, 20, "arrivals");

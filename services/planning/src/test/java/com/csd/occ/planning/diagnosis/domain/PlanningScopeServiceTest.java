@@ -137,7 +137,8 @@ class PlanningScopeServiceTest {
         when(codec.decode("corrupt-input")).thenThrow(new IllegalStateException("invalid legacy JSON"));
         when(codec.decode("corrupt-diagnosis")).thenThrow(new IllegalStateException("invalid legacy JSON"));
         when(codec.decodeStringList("evidence-json")).thenReturn(List.of("bunching:event", "traffic-incident:incident"));
-        when(codec.decodeStringList("limitations-json")).thenReturn(List.of("Road impact is unverified."));
+        when(codec.decodeStringList("limitations-json")).thenReturn(List.of("Missing evidence field: traffic-incidents-within-lookback",
+                "Road impact is unverified."));
 
         var page = service.list(0, 10);
 
@@ -146,6 +147,8 @@ class PlanningScopeServiceTest {
                 .containsExactly(DiagnosisRequestStatus.PENDING, DiagnosisRequestStatus.PENDING);
         assertThat(page.items()).extracting(PlanningDiagnosisSummary::processingRequested).containsExactly(true, false);
         assertThat(page.items().getFirst().likelyCause()).contains("Vehicle Breakdown", "Teck Whye Avenue");
+        assertThat(page.items().getFirst().limitations()).containsExactly(
+                "The retained diagnosis has limited evidence about incidents along the route.", "Road impact is unverified.");
         assertThat(page.items().getFirst().evidenceDetails()).hasSize(1);
         assertThat(page.items().getFirst().serviceId()).isEqualTo("190");
         assertThat(page.items().getFirst().affectedBusReferences()).isEmpty();

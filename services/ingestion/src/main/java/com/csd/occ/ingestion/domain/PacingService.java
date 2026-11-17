@@ -1,7 +1,10 @@
 package com.csd.occ.ingestion.domain;
 
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
@@ -35,10 +38,13 @@ public class PacingService {
      * connection is held while snapshots are written to slow clients.
      */
     public PacingSnapshot refresh() {
-        var inputs = arrivals.findPacingArrivals().stream().map(PacingService::arrival).toList();
+        var predictions = arrivals.findPacingArrivals();
         var now = clock.instant();
+        var staleAfter = configuration.staleAfter();
+        var inputs = predictions.stream().map(view -> arrival(view, now, staleAfter)).toList();
+        var demoRunId = predictions.stream().map(PacingArrivalView::getDemoRunId).filter(Objects::nonNull).findFirst();
         var snapshot = new PacingSnapshot(now, policy.evaluate(inputs, now, configuration.targetHeadway(),
-                configuration.tooCloseRatio(), configuration.tooFarRatio(), configuration.staleAfter()));
+                configuration.tooCloseRatio(), configuration.tooFarRatio(), staleAfter), demoRunId);
         latest.set(snapshot);
         subscriptions.forEach(subscription -> deliver(subscription, snapshot));
         return snapshot;
@@ -77,10 +83,20 @@ public class PacingService {
         }
     }
 
-    private static PacingArrival arrival(PacingArrivalView view) {
+    private static PacingArrival arrival(PacingArrivalView view, Instant now, Duration staleAfter) {
+        var observedAt = view.getFetchedAt();
+        var eta = view.getEstimatedArrivalAt();
+        if (view.isRoadworksScenario()) {
+            // The deterministic route clock keeps these forecast gaps current while the fleet advances.
+            observedAt = now;
+        } else if (view.isReplayComplete() && !now.isBefore(observedAt.plus(staleAfter))) {
+            // A completed replay keeps forecasting the same synthetic arrival pattern each cycle.
+            // Keep this projection out of the detector's persisted evidence and review snapshots.
+            eta = now.plus(Duration.between(observedAt, eta));
+            observedAt = now;
+        }
         return new PacingArrival(view.getClassification(), view.getStopCode(), view.getServiceId(),
-                view.getDirectionId(), view.getEstimatedArrivalAt(), view.getFetchedAt(),
-                Optional.ofNullable(view.getVehicleReference()));
+                view.getDirectionId(), eta, observedAt, Optional.ofNullable(view.getVehicleReference()));
     }
 
     public final class Subscription {

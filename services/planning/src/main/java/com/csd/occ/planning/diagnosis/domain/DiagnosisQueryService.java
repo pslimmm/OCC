@@ -30,7 +30,8 @@ public class DiagnosisQueryService {
         return new DiagnosisView(diagnosis.id(), request.status(), request.failureCode(), diagnosis.causeCode(),
                 diagnosis.causeSubtype(), summary.likelyCause(), diagnosis.confidence(),
                 diagnosis.evidenceSupportScore(), decodeList(diagnosis.supportingEvidenceIdsJson()),
-                decodeList(diagnosis.limitationsJson()), diagnosis.completedAt(), request.eventType(),
+                DiagnosisSummaryPolicy.displayLimitations(decodeList(diagnosis.limitationsJson())),
+                diagnosis.completedAt(), request.eventType(),
                 request.eventId(), request.producer(),
                 delivery == null ? null : delivery.status(), delivery == null ? null : delivery.failureCode(),
                 summary.evidenceDetails());

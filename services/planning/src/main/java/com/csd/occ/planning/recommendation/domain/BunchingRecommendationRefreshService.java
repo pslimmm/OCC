@@ -90,7 +90,7 @@ public class BunchingRecommendationRefreshService {
             throw new AdvisoryConflictException("Current bunching evidence is unavailable or expired");
         }
         var buses = group.affectedBusReferences();
-        var gaps = group.adjacentGapSeconds();
+        var gaps = group.controlGapSeconds();
         if (buses == null || buses.size() < 2 || buses.size() > 100
                 || buses.stream().anyMatch(bus -> bus == null || bus.isBlank())
                 || buses.stream().distinct().count() != buses.size()
@@ -114,17 +114,24 @@ public class BunchingRecommendationRefreshService {
         if (!group.isFreshAt(now)) throw new AdvisoryConflictException("Current bunching evidence expired during review");
         var policy = new BunchingRecommendationPolicy();
         var suggestions = policy.suggestOutcomes(group, fleet, route, event.expectedHeadwaySeconds(), now);
+        var projection = group.controlPrediction();
+        var predictionId = projection == null ? null : projection.snapshotId();
+        var reviewed = previous.mitigationContext();
         if (group.rawObservationId().equals(previous.revisionRawObservationId())
-                && group.validUntil().equals(previous.mitigationContext().predictionValidUntil())
+                && group.controlValidUntil().equals(reviewed.predictionValidUntil())
+                && java.util.Objects.equals(predictionId, reviewed.controlPredictionId())
+                && gaps.equals(reviewed.currentPredictionGaps())
                 && suggestions.equals(previous.recommendation().suggestedOutcomes())) {
             return previous;
         }
 
         // Preserve the single-target summary used by existing clients.
-        var mitigation = new ValidatedMitigationContext(buses.getLast(), buses, group.stopCode(),
+        var mitigation = new ValidatedMitigationContext(buses.getLast(), buses, group.controlStopCode(),
                 FollowingBusState.READY_TO_DEPART, BunchingRecommendationPolicy.SIMULATION_MAXIMUM_HOLD_SECONDS,
                 BunchingRecommendationPolicy.SIMULATION_MAXIMUM_DWELL_SECONDS, CrowdSafetyStatus.PASSED,
-                MitigationValidationStatus.VALIDATED, List.of(group.rawObservationId().toString()), gaps, group.validUntil());
+                MitigationValidationStatus.VALIDATED, projection == null ? List.of(group.rawObservationId().toString())
+                        : List.of(group.rawObservationId().toString(), projection.snapshotId().toString()),
+                gaps, group.controlValidUntil(), projection == null ? null : projection.stopSequence(), predictionId);
         int gap = mitigation.targetHeadwaySeconds(event);
         var impact = new SimulatedImpactEstimate(gap,
                 gap + Math.max(0, Math.min(event.expectedHeadwaySeconds() - gap, mitigation.maximumHoldSeconds())), 0, 0, BigDecimal.ZERO, BigDecimal.ZERO);

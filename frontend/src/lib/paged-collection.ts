@@ -32,6 +32,7 @@ export function usePagedCollection<T, P extends PagedResult<T>>(
   loadPage: (page: number, signal: AbortSignal) => Promise<P>,
   itemId: (item: T) => string,
   enabled = true,
+  { preservePagesOnRefresh = false }: { preservePagesOnRefresh?: boolean } = {},
 ) {
   const [state, setState] = useState(() => emptyState<T, P>(collectionKey, enabled))
   const stateRef = useRef(state)
@@ -49,9 +50,14 @@ export function usePagedCollection<T, P extends PagedResult<T>>(
   }, [])
 
   const fetchPage = useCallback(async (page: number, requestGeneration: number, key: string,
-    controller: AbortController) => {
+    controller: AbortController, retainedPages = 0) => {
     try {
       const response = await loadPageRef.current(page, controller.signal)
+      if (controller.signal.aborted || requestGeneration !== generation.current || key !== latestKey.current) return
+      const nextPage = Math.max(page + 1, Math.min(retainedPages, response.totalPages))
+      const additionalPages = retainedPages > 0 && nextPage > 1 ? await Promise.all(
+        Array.from({ length: nextPage - 1 }, (_, index) => loadPageRef.current(index + 1, controller.signal)),
+      ) : []
       if (controller.signal.aborted || requestGeneration !== generation.current || key !== latestKey.current) return
 
       if (activeRequest.current?.controller === controller) activeRequest.current = null
@@ -59,15 +65,15 @@ export function usePagedCollection<T, P extends PagedResult<T>>(
       const items = page === 0 ? [] : current.items
       const ids = new Set(items.map(itemIdRef.current))
       const merged = [...items]
-      for (const item of response.items) {
+      for (const item of [response, ...additionalPages].flatMap(result => result.items)) {
         const id = itemIdRef.current(item)
         if (!ids.has(id)) { ids.add(id); merged.push(item) }
       }
       publish({ ...current, collectionKey: key, items: merged, latestPage: response,
-        nextPage: page + 1, hasMore: response.items.length > 0 && page + 1 < response.totalPages,
+        nextPage, hasMore: (additionalPages.at(-1) ?? response).items.length > 0 && nextPage < response.totalPages,
         isLoading: false, isLoadingMore: false, error: null, refreshError: false,
         lastSuccessAt: page === 0 ? new Date().toISOString() : current.lastSuccessAt })
-      if (page === 0 && viewport.current) viewport.current.scrollTop = 0
+      if (page === 0 && retainedPages === 0 && viewport.current) viewport.current.scrollTop = 0
     } catch (error) {
       if (!controller.signal.aborted && requestGeneration === generation.current && key === latestKey.current) {
         if (activeRequest.current?.controller === controller) activeRequest.current = null
@@ -89,8 +95,9 @@ export function usePagedCollection<T, P extends PagedResult<T>>(
     activeRequest.current = { generation: requestGeneration, controller }
     const previous = stateRef.current.collectionKey === collectionKey ? stateRef.current : emptyState<T, P>(collectionKey, true)
     publish({ ...previous, isLoading: true, isLoadingMore: false, error: null, refreshError: false })
-    return fetchPage(0, requestGeneration, collectionKey, controller).finally(() => signal?.removeEventListener('abort', abort))
-  }, [collectionKey, fetchPage, publish])
+    const retainedPages = preservePagesOnRefresh ? previous.nextPage + Number(previous.isLoadingMore) : 0
+    return fetchPage(0, requestGeneration, collectionKey, controller, retainedPages).finally(() => signal?.removeEventListener('abort', abort))
+  }, [collectionKey, fetchPage, preservePagesOnRefresh, publish])
   const reload = useCallback(() => refresh(), [refresh])
 
   const updateItem = useCallback((item: T) => {

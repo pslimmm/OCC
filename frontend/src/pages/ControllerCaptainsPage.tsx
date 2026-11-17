@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiRequest, type DirectoryPage, type DirectoryUser } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -11,16 +11,27 @@ import { captainDirectoryPath } from '@/pages/controller-captains'
 const emptyPage = (): DirectoryPage => ({ items: [], page: 0, size: 20, totalItems: 0, totalPages: 0, directorySynchronizedAt: null })
 const displayName = (captain: DirectoryUser) => captain.displayName || captain.name || 'Unnamed captain'
 
-export function ControllerCaptainsPage({ token }: { token: string }) {
+export function ControllerCaptainsPage({ token, refreshing, onRefresh, registerRefresh, onRefreshTimeChange }: {
+  token: string
+  refreshing: boolean
+  onRefresh: () => void
+  registerRefresh: (callback: (signal: AbortSignal) => Promise<void>) => void
+  onRefreshTimeChange: (at: string) => void
+}) {
   const [search, setSearch] = useState('')
   const [pageNo, setPageNo] = useState(0)
   const [data, setData] = useState<DirectoryPage>(emptyPage)
   const [scope, setScope] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [refresh, setRefresh] = useState(0)
+  const activeRequest = useRef<AbortController | null>(null)
 
-  const load = useCallback(async (page: number, signal: AbortSignal) => {
+  const load = useCallback(async (page: number, refreshSignal: AbortSignal) => {
+    if (refreshSignal.aborted) return
+    activeRequest.current?.abort()
+    const controller = new AbortController()
+    activeRequest.current = controller
+    const signal = AbortSignal.any([refreshSignal, controller.signal])
     const requestScope = `${token}:${search.trim()}`
     setBusy(true)
     setError('')
@@ -31,6 +42,7 @@ export function ControllerCaptainsPage({ token }: { token: string }) {
       setData(result)
       setPageNo(result.page)
       setScope(requestScope)
+      onRefreshTimeChange(new Date().toISOString())
     } catch (e) {
       if (signal.aborted) return
       if (e instanceof ApiError && e.status === 401) void signOut(e.message)
@@ -38,13 +50,21 @@ export function ControllerCaptainsPage({ token }: { token: string }) {
     } finally {
       if (!signal.aborted) setBusy(false)
     }
-  }, [search, token])
+  }, [onRefreshTimeChange, search, token])
+
+  useEffect(() => {
+    registerRefresh(signal => load(pageNo, signal))
+    return () => {
+      registerRefresh(() => Promise.resolve())
+      activeRequest.current?.abort()
+    }
+  }, [load, pageNo, registerRefresh])
 
   useEffect(() => {
     const controller = new AbortController()
     const timer = window.setTimeout(() => void load(pageNo, controller.signal), search ? 200 : 0)
     return () => { window.clearTimeout(timer); controller.abort() }
-  }, [load, pageNo, refresh, search])
+  }, [load, pageNo, search])
 
   const currentScope = `${token}:${search.trim()}`
   const rows = scope === currentScope ? data.items : []
@@ -54,7 +74,7 @@ export function ControllerCaptainsPage({ token }: { token: string }) {
     <CardContent className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
         <div className="grid w-full max-w-sm gap-1.5"><Label htmlFor="captain-directory-search">Search captains</Label><Input id="captain-directory-search" placeholder="Name or email" value={search} onChange={event => { setSearch(event.target.value); setPageNo(0) }} /></div>
-        <Button variant="outline" disabled={busy} onClick={() => setRefresh(value => value + 1)}>Refresh</Button>
+        <Button variant="outline" disabled={busy || refreshing} onClick={onRefresh}>Refresh</Button>
       </div>
       {error && <p role="alert">{error}</p>}
       {busy && !rows.length && <p role="status">Loading captains…</p>}

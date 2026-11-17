@@ -23,7 +23,7 @@ public record CaptainRouteResponse(
                     nullable = true, requiredMode = Schema.RequiredMode.REQUIRED) PacingGapResponse ahead,
             @Schema(description = "Gap to the bus behind; null when no bus behind is in the same prediction set",
                     nullable = true, requiredMode = Schema.RequiredMode.REQUIRED) PacingGapResponse behind,
-            @Schema(description = "When the predictions behind these gaps were fetched (UTC)",
+            @Schema(description = "When the simulation predictions behind these gaps were fetched or generated (UTC)",
                     requiredMode = Schema.RequiredMode.REQUIRED) Instant observedAt,
             @Schema(description = "When the pacing cycle ran (UTC)", requiredMode = Schema.RequiredMode.REQUIRED)
             Instant calculatedAt) {}

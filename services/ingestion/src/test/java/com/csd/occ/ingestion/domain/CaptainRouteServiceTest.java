@@ -42,7 +42,7 @@ class CaptainRouteServiceTest {
         assignment = new DemoVehicleAssignment(new DemoVehicleAssignmentId(runId, "demo-190-b"),
                 "190", 1, "SBS5898U", "SBST", "DD", "DEMO-CAPTAIN", CAPTAIN);
         when(polling.staleAfterSeconds()).thenReturn(180);
-        when(pacing.latest()).thenReturn(new PacingSnapshot(NOW, List.of()));
+        when(pacing.latest()).thenReturn(new PacingSnapshot(NOW, List.of(), Optional.empty()));
         when(runs.findActive()).thenReturn(Optional.of(run));
         when(assignments.findByIdDemoRunIdAndCaptainUserId(runId, CAPTAIN)).thenReturn(Optional.of(assignment));
         when(topology.busRoute("190")).thenReturn(Optional.of(new ReferenceTopologyPort.BusRoute("190", List.of(
@@ -97,12 +97,16 @@ class CaptainRouteServiceTest {
         // A live queue-position reference can never match a simulation registration.
         var live = new PacingMetric("SBS5898U", "OBSERVATION_ONLY", "44251", "190", 1, Duration.ofSeconds(180),
                 Optional.empty(), Optional.empty(), NOW.minusSeconds(5));
-        when(pacing.latest()).thenReturn(new PacingSnapshot(NOW, List.of(otherBus, live, mine)));
+        when(pacing.latest()).thenReturn(new PacingSnapshot(NOW, List.of(otherBus, live, mine), Optional.of(runId)));
 
         var result = service.current(CAPTAIN.toString()).orElseThrow().pacing().orElseThrow();
 
         assertThat(result.metric()).isSameAs(mine);
         assertThat(result.calculatedAt()).isEqualTo(NOW);
+
+        // A newly opened simulation can reuse the same fictional registration.
+        when(pacing.latest()).thenReturn(new PacingSnapshot(NOW, List.of(mine), Optional.of(UUID.randomUUID())));
+        assertThat(service.current(CAPTAIN.toString()).orElseThrow().pacing()).isEmpty();
     }
 
     @Test
@@ -111,7 +115,7 @@ class CaptainRouteServiceTest {
         when(pacing.latest()).thenThrow(new PacingUnavailableException());
         assertThat(service.current(CAPTAIN.toString()).orElseThrow().pacing()).isEmpty();
 
-        doReturn(new PacingSnapshot(NOW, List.of())).when(pacing).latest();
+        doReturn(new PacingSnapshot(NOW, List.of(), Optional.empty())).when(pacing).latest();
         assertThat(service.current(CAPTAIN.toString()).orElseThrow().pacing()).isEmpty();
     }
 

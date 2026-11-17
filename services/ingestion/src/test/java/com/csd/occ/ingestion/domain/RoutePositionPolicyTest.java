@@ -409,6 +409,43 @@ class RoutePositionPolicyTest {
     }
 
     @Test
+    void neighboringStopQueuesLinkTheService190DuplicateFromTheScreenshot() {
+        List<RoutePositionReading> readings = neighboringStopQueues(40, 103.8330933);
+
+        var estimate = estimate(readings, false, true, 22_900);
+
+        assertThat(estimate.buses()).extracting(RoutePositionBus::distanceAlongRouteM)
+                .containsExactly(18_926.0, 16_885.0, 14_545.0);
+        RoutePositionBus firstBus = estimate.buses().getFirst();
+        assertThat(firstBus.evidenceObservationIds()).contains(readings.get(3).observationId());
+        assertThat(firstBus.positionEvidenceObservationIds()).containsExactly(
+                readings.get(6).observationId(), readings.getFirst().observationId());
+    }
+
+    @Test
+    void neighboringStopQueuesKeepNearbyEstimatesWhenTheQueueOrEtaDisagrees() {
+        assertThat(estimate(neighboringStopQueues(40, 103.8335000), false, true, 22_900).buses())
+                .extracting(RoutePositionBus::distanceAlongRouteM).contains(18_926.0, 18_893.0);
+        assertThat(estimate(neighboringStopQueues(80, 103.8330933), false, true, 22_900).buses())
+                .extracting(RoutePositionBus::distanceAlongRouteM).contains(18_926.0, 18_893.0);
+    }
+
+    @Test
+    void neighboringStopQueuesCannotLinkBusesPreviouslyReportedTogether() {
+        List<RoutePositionReading> readings = new ArrayList<>(neighboringStopQueues(40, 103.8330933));
+        UUID sharedSnapshot = snapshot("neighboring-queues-historical-coexistence");
+        UUID olderCycle = UUID.fromString("00000000-0000-0000-0000-000000000002");
+        readings.add(reading(sharedSnapshot, olderCycle, "10041", 35, 1,
+                18_926, 1.2803153, 103.8402278, "44009", "10499", 1, 180, 70));
+        readings.add(reading(sharedSnapshot, olderCycle, "10041", 35, 2,
+                18_893, 1.2805455, 103.8404050, "44009", "10499", 1, 190, 70));
+
+        assertThat(estimate(readings, false, true, 22_900).buses())
+                .extracting(RoutePositionBus::distanceAlongRouteM)
+                .containsExactly(18_926.0, 18_893.0, 16_885.0, 14_545.0);
+    }
+
+    @Test
     void screenshotRegressionRemovesOnlyTwoRefreshBoundaryDuplicates() {
         ScreenshotReadings screenshot = screenshotReadings();
 
@@ -658,6 +695,28 @@ class RoutePositionPolicyTest {
         return RoutePositionPolicy.estimateWithConfidence(
                 readings, 10_000, circular, 10_000, NOW, PARAMETERS,
                 identityLinkEnabled, coordinatedRefreshBoundaryEnabled, circularPhaseLinkEnabled);
+    }
+
+    private List<RoutePositionReading> neighboringStopQueues(long middleEta, double middleTailLongitude) {
+        // Excerpt of the 13:20 UTC service 190 sweep, with times relative to 13:20:40.
+        return List.of(
+                queueReading("05069", 33, 1, 21_600, 18_926, 1.2803153, 103.8402278, -46, 9_026),
+                queueReading("05069", 33, 2, 21_600, 16_885, 1.2951268, 103.8512392, 536, 9_026),
+                queueReading("05069", 33, 3, 21_600, 14_545, 1.3043857, 103.8330933, 1_044, 9_026),
+                queueReading("10011", 34, 1, 22_000, 18_893, 1.2805455, 103.8404050, middleEta, 9_222),
+                queueReading("10011", 34, 2, 22_000, 16_885, 1.2951268, 103.8512392, 621, 9_222),
+                queueReading("10011", 34, 3, 22_000, 14_545, 1.3043857, middleTailLongitude, 1_132, 9_222),
+                queueReading("10041", 35, 1, 22_300, 18_926, 1.2803153, 103.8402278, 92, 15_177),
+                queueReading("10041", 35, 2, 22_300, 16_885, 1.2951268, 103.8512392, 676, 15_177),
+                queueReading("10041", 35, 3, 22_300, 14_545, 1.3043857, 103.8330933, 1_185, 15_177));
+    }
+
+    private RoutePositionReading queueReading(String stopCode, int sequence, int order, double stopDistance,
+            double distance, double latitude, double longitude, long etaOffset, long fetchedMillisAgo) {
+        UUID snapshotId = snapshot("neighboring-queues-" + stopCode);
+        return new RoutePositionReading(observation(snapshotId, stopCode, order), snapshotId, CURRENT_CYCLE,
+                stopCode, sequence, order, distance, stopDistance, latitude, longitude, "44009", "10499", 1,
+                List.of(stopDistance), List.of(), NOW.plusSeconds(etaOffset), NOW.minusMillis(fetchedMillisAgo));
     }
 
     private ScreenshotReadings screenshotReadings() {

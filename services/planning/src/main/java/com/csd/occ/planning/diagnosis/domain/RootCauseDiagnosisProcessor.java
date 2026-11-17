@@ -60,8 +60,8 @@ public class RootCauseDiagnosisProcessor {
                     || arrival.fetchedAt() == null || arrival.fetchedAt().isAfter(latestConfirmationAt))
                     || context.incidents().stream().anyMatch(incident -> !event.classification().equals(incident.classification())
                     || !java.util.Objects.equals(event.demoRunId(), incident.demoRunId()) || incident.fetchedAt() == null
-                    || incident.fetchedAt().isAfter(event.firstConfirmedAt())
-                    || incident.observedAt() != null && incident.observedAt().isAfter(event.firstConfirmedAt())))
+                    || incident.fetchedAt().isAfter(incidentCutoff(event, incident))
+                    || incident.observedAt() != null && incident.observedAt().isAfter(incidentCutoff(event, incident))))
                 throw new DiagnosisFailureException("EVIDENCE_PROVENANCE_MISMATCH", false);
             List<UUID> eventObservationIds = event.confirmingObservationIds().stream().distinct().sorted().toList();
             List<UUID> contextObservationIds = context.arrivals().stream().map(ArrivalEvidence::observationId)
@@ -80,6 +80,20 @@ public class RootCauseDiagnosisProcessor {
             EvidenceSnapshot snapshot = new EvidenceSnapshot(event, context, allowedEvidenceIds, event.classification());
             String snapshotJson = snapshots.encode(snapshot);
             snapshotHash = hash(snapshotJson);
+
+            var verifiedDelay = SimulationRoadworksDiagnosisPolicy.verify(snapshot);
+            if (verifiedDelay.isPresent()) {
+                var delay = verifiedDelay.orElseThrow();
+                String causeCode = SimulationRoadworksDiagnosisPolicy.CAUSE_CODE;
+                String likelyCause = summaries.summarize(causeCode, "ROADWORKS", delay.supportingEvidenceIds(), snapshot).likelyCause();
+                RootCauseDiagnosis diagnosis = new RootCauseDiagnosis(UUID.randomUUID(), request.id(), causeCode,
+                        "ROADWORKS", likelyCause, null, null, delay.supportingEvidenceIds(),
+                        List.of("The roadworks delay and bus spacing are modeled by the simulation."), null,
+                        snapshotJson, snapshotHash, "OCC_REPLAY", "roadworks-delay",
+                        SimulationRoadworksDiagnosisPolicy.VERSION, "simulation-delay-evidence-v1", clock.instant());
+                complete(event, diagnosis, invocationDetails);
+                return;
+            }
 
             List<String> feedback = List.of();
             ModelOutput output = null;
@@ -119,13 +133,7 @@ public class RootCauseDiagnosisProcessor {
                     limitations, null, snapshotJson, snapshotHash, "GOOGLE_GENAI",
                     invocationDetails.getLast().model(), invocationDetails.getLast().promptVersion(),
                     invocationDetails.getLast().schemaVersion(), clock.instant());
-            if ("OBSERVATION_ONLY".equals(event.classification())) {
-                completion.completeAdvisory(request.id(), diagnosis, invocationDetails, snapshotHash);
-                return;
-            }
-            UUID deliveryId = UUID.randomUUID();
-            String payload = payloads.encode(deliveryId, event, diagnosis, event.classification());
-            completion.complete(request.id(), diagnosis, invocationDetails, snapshotHash, payload, deliveryId);
+            complete(event, diagnosis, invocationDetails);
         } catch (DiagnosisFailureException failure) {
             fail(request, failure.failureCode(), failure.isRetryable(), invocationDetails, snapshotHash);
         } catch (EvidenceLimitExceededException failure) {
@@ -135,32 +143,37 @@ public class RootCauseDiagnosisProcessor {
         }
     }
 
+    private void complete(BunchingEventFacts event, RootCauseDiagnosis diagnosis, List<ModelInvocationDetails> invocations) {
+        if ("OBSERVATION_ONLY".equals(event.classification())) {
+            completion.completeAdvisory(diagnosis.requestId(), diagnosis, invocations, diagnosis.evidenceSnapshotHash());
+            return;
+        }
+        UUID deliveryId = UUID.randomUUID();
+        String payload = payloads.encode(deliveryId, event, diagnosis, event.classification());
+        completion.complete(diagnosis.requestId(), diagnosis, invocations, diagnosis.evidenceSnapshotHash(), payload, deliveryId);
+    }
+
     private RootCauseContext bound(RootCauseContext context, BunchingEventFacts event) {
         if (context.arrivals().size() > 20 || context.incidents().size() > 50)
             throw new DiagnosisFailureException("EVIDENCE_LIMIT_EXCEEDED", false);
         Instant cutoff = event.firstConfirmedAt().minus(settings.evidenceLookback());
-        List<IncidentEvidence> incidents = context.incidents().stream().map(incident -> new IncidentEvidence(
-                incident.evidenceId(), incident.incidentId(), incident.incidentType(), incident.message(),
-                incident.latitude(), incident.longitude(), incident.observedAt(), incident.fetchedAt(),
-                incident.classification(), incident.demoRunId()))
+        List<IncidentEvidence> incidents = context.incidents().stream()
                 .filter(incident -> {
+                    Instant asOf = incidentCutoff(event, incident);
                     Instant relevantAt = incident.observedAt() == null ? incident.fetchedAt() : incident.observedAt();
-                    return incident.fetchedAt() != null && !incident.fetchedAt().isAfter(event.firstConfirmedAt())
+                    return incident.fetchedAt() != null && !incident.fetchedAt().isAfter(asOf)
                             && relevantAt != null && !relevantAt.isBefore(cutoff)
-                            && !relevantAt.isAfter(event.firstConfirmedAt());
+                            && !relevantAt.isAfter(asOf);
                 })
                 .sorted(java.util.Comparator.comparing(incident -> incident.observedAt() == null
                         ? incident.fetchedAt() : incident.observedAt()))
                 .toList();
-        List<String> missingFields = new ArrayList<>(context.missingFields());
-        if (incidents.isEmpty() && !missingFields.contains("traffic-incidents-within-lookback")
-                && !missingFields.contains("traffic-incidents"))
-            missingFields.add("traffic-incidents-within-lookback");
-        List<String> distinctMissingFields = missingFields.stream().distinct().toList();
-        if (distinctMissingFields.size() > 20)
-            throw new DiagnosisFailureException("EVIDENCE_LIMIT_EXCEEDED", false);
         return new RootCauseContext(context.classification(), context.demoRunId(), context.referenceVersionId(),
-                context.arrivals(), incidents, distinctMissingFields);
+                context.arrivals(), incidents, context.missingFields().stream().distinct().toList(), context.simulationDelay());
+    }
+
+    private Instant incidentCutoff(BunchingEventFacts event, IncidentEvidence incident) {
+        return incident.isSimulationHazard() ? event.confirmingObservationTimes().getLast() : event.firstConfirmedAt();
     }
 
     private void validateOutput(ModelOutput output, EvidenceSnapshot snapshot) {
@@ -181,28 +194,27 @@ public class RootCauseDiagnosisProcessor {
             throw new IllegalArgumentException("causeSubtype is limited to 100 characters");
     }
 
-    private List<String> limitations(ModelOutput output, RootCauseContext context, BunchingEvidenceSupportPolicy.AssociatedEvidence association) {
-        List<String> values = context.missingFields().stream().map(field -> "Missing evidence field: " + field)
-                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+    private List<String> limitations(ModelOutput output, RootCauseContext context,
+                                     BunchingEvidenceSupportPolicy.AssociatedEvidence association) {
+        List<String> values = new ArrayList<>();
+        if (context.simulationDelay() != null && "SIMULATION".equals(context.classification())) {
+            values.add("The diagnosis could not verify the recorded simulation delay.");
+        } else if (context.incidents().stream().anyMatch(IncidentEvidence::isSimulationHazard)) {
+            values.add("The simulation replays bus spacing and hazards separately. Hazard-related bus delays are unmeasured.");
+        } else if (context.incidents().isEmpty()) {
+            values.add("No incident observations were available in the diagnosis evidence window.");
+        }
         values.addAll(association.limitations());
-        if ("OBSERVATION_ONLY".equals(context.classification()))
+        boolean live = "OBSERVATION_ONLY".equals(context.classification());
+        if (live)
             values.add("Live diagnosis only: validated vehicle assignments, control stops and crowd-safety inputs are unavailable; no operational instruction is issued.");
-        if ("UNKNOWN".equals(output.causeCode()) && !values.contains("Available evidence does not identify a supported contributing incident or operational cause.")) {
-            values.add("No contextual evidence supported a specific cause.");
-        }
-        for (String lim : output.limitations()) {
-            if (lim != null && !lim.isBlank()) {
-                boolean redundant = values.stream().anyMatch(v ->
-                        v.equalsIgnoreCase(lim) ||
-                        (v.contains("traffic-incidents") && lim.toLowerCase(java.util.Locale.ROOT).contains("traffic incident data was supplied")) ||
-                        (v.contains("Passenger load categories") && lim.contains("Passenger load categories")) ||
-                        (v.contains("External traffic incident logs") && lim.contains("External traffic incident logs")));
-                if (!redundant) {
-                    values.add(lim);
-                }
-            }
-        }
-        return values.stream().filter(value -> value != null && !value.isBlank()).distinct().limit(20).toList();
+        context.missingFields().stream()
+                .filter(field -> !"traffic-incidents".equals(field) && !"traffic-incidents-within-lookback".equals(field))
+                .map(field -> "Missing evidence field: " + field).forEach(values::add);
+        if (live)
+            output.limitations().stream().filter(value -> values.stream().noneMatch(value::equalsIgnoreCase)).toList()
+                    .forEach(values::add);
+        return values.stream().distinct().limit(20).toList();
     }
 
     private ModelInvocationDetails withOutcome(ModelInvocationDetails details, String outcome) {

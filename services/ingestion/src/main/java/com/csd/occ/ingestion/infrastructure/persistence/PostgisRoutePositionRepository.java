@@ -30,16 +30,23 @@ public class PostgisRoutePositionRepository implements RoutePositionRepository {
                 SELECT service_id, count(*) AS target_count
                 FROM enabled_targets
                 GROUP BY service_id
-            ), completed_service_cycles AS (
-                SELECT run.route_position_poll_cycle_id, target.service_id,
-                       max(run.completed_at) AS completed_at
+            ), recent_poll_cycles AS (
+                SELECT DISTINCT run.route_position_poll_cycle_id
                 FROM ingestion.poll_run run
                 JOIN enabled_targets target
                   ON target.source = run.source AND target.scope_key = run.scope_key
-                JOIN enabled_target_counts target_count ON target_count.service_id = target.service_id
                 WHERE run.route_position_poll_cycle_id IS NOT NULL
-                  AND run.completed_at IS NOT NULL
                   AND run.completed_at BETWEEN ? AND ?
+            ), completed_service_cycles AS (
+                -- Check coverage across the entire sweep. The age limit applies to individual position readings below.
+                SELECT run.route_position_poll_cycle_id, target.service_id,
+                       max(run.completed_at) AS completed_at
+                FROM recent_poll_cycles recent
+                JOIN ingestion.poll_run run ON run.route_position_poll_cycle_id = recent.route_position_poll_cycle_id
+                JOIN enabled_targets target
+                  ON target.source = run.source AND target.scope_key = run.scope_key
+                JOIN enabled_target_counts target_count ON target_count.service_id = target.service_id
+                WHERE run.completed_at <= ?
                 GROUP BY run.route_position_poll_cycle_id, target.service_id, target_count.target_count
                 HAVING count(DISTINCT run.scope_key) = target_count.target_count
                    AND bool_and(coalesce(run.outcome IN ('SUCCESS', 'PARTIAL'), false))
@@ -231,9 +238,10 @@ public class PostgisRoutePositionRepository implements RoutePositionRepository {
             statement.setString(1, serviceId);
             statement.setTimestamp(2, Timestamp.from(from));
             statement.setTimestamp(3, Timestamp.from(to));
-            statement.setString(4, serviceId);
-            statement.setTimestamp(5, Timestamp.from(from));
-            statement.setTimestamp(6, Timestamp.from(to));
+            statement.setTimestamp(4, Timestamp.from(to));
+            statement.setString(5, serviceId);
+            statement.setTimestamp(6, Timestamp.from(from));
+            statement.setTimestamp(7, Timestamp.from(to));
         }, (result, rowNumber) -> new RoutePositionRow(result.getString("operator"),
                 result.getInt("direction_id"), result.getObject("selected_poll_cycle_id", UUID.class),
                 result.getObject("observation_id", UUID.class),

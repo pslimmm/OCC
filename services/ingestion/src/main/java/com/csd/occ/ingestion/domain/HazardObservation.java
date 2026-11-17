@@ -39,6 +39,7 @@ public class HazardObservation {
     public UUID id() { return id; }
     public UUID rawObservationId() { return rawObservationId; }
     public UUID pollRunId() { return pollRunId; }
+    public String sourceIncidentKey() { return sourceIncidentKey; }
     public HazardFeedPort.Fact facts() { return hazardFacts; }
     public Instant fetchedAt() { return fetchedAt; }
     public String classification() { return classification; }

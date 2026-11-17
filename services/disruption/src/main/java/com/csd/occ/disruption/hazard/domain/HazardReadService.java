@@ -106,20 +106,31 @@ public class HazardReadService {
         UUID runId = selection.current().demoRunId();
         try {
             for (var location : state.facts().locations()) {
-                if ("STATION_REFERENCE".equals(location.geometryRole())) {
-                    var station = stations.computeIfAbsent(location.sourceReference(), transit::station);
-                    if (station.isPresent()) {
-                        var value = station.get();
-                        locations.add(new HazardPollPort.Location("STATION", value.code(), value.name(), value.latitude(),
-                                value.longitude(), null, "STATION_PROXIMITY", "INFERRED"));
-                    } else limitations.add("Unresolved station: " + location.sourceReference());
-                } else locations.add(location);
+                if (!"STATION_REFERENCE".equals(location.geometryRole())) {
+                    locations.add(location);
+                    continue;
+                }
+                if ("SIMULATION".equals(state.classification()) && state.demoRunId() != null
+                        && location.latitude() != null && location.longitude() != null) {
+                    locations.add(new HazardPollPort.Location("STATION", location.sourceReference(), location.description(),
+                            location.latitude(), location.longitude(), location.radiusKm(), "STATION_PROXIMITY", "INFERRED"));
+                    continue;
+                }
+                var station = stations.computeIfAbsent(location.sourceReference(), transit::station);
+                if (station.isPresent()) {
+                    var value = station.get();
+                    locations.add(new HazardPollPort.Location("STATION", value.code(), value.name(), value.latitude(),
+                            value.longitude(), null, "STATION_PROXIMITY", "INFERRED"));
+                } else limitations.add("Unresolved station: " + location.sourceReference());
             }
             if (runId != null && (state.demoRunId() == null || runId.equals(state.demoRunId()))) {
                 var fleet = fleets.computeIfAbsent(runId, id -> transit.fleet(id, 0));
                 if (fleet.items().size() < fleet.totalElements()) limitations.add("Only the first fleet page was assessed.");
                 for (var bus : fleet.items()) {
-                    if (bus.progress() == null) { limitations.add("Progress unavailable for " + bus.busId()); continue; }
+                    if (bus.nextStopSequence() == null) {
+                        limitations.add("Route position unavailable for " + bus.busId());
+                        continue;
+                    }
                     matches.addAll(exposure.assess(bus, routes.computeIfAbsent(bus.serviceId(), transit::route), locations, transit.associationRadiusKm()));
                 }
             } else limitations.add("No active synthetic fleet; live arrival predictions do not identify buses.");

@@ -56,7 +56,7 @@ class DiagnosisTriggerHttpIT {
         var request = save(EventType.BUS_BUNCHING);
         assertThat(trigger(request.id())).contains("\"status\":\"PENDING\"");
         assertThat(repository.findById(request.id()).orElseThrow().isProcessingRequested()).isTrue();
-        assertThat(requests.claimDueRequests(1, Duration.ofMinutes(5), false)).containsExactly(request.id());
+        assertThat(requests.claimDueBunchingDiagnoses(1, Duration.ofMinutes(5), false)).containsExactly(request.id());
         var claimed = repository.findById(request.id()).orElseThrow();
 
         assertThat(trigger(request.id())).contains("\"status\":\"PROCESSING\"");

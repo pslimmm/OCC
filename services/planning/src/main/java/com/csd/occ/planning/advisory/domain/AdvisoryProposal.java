@@ -58,7 +58,7 @@ public class AdvisoryProposal {
     public String sourceRevisionKey() { return sourceRevisionKey; }
     public String candidateType() { return candidateType; }
     public String status() { return status; }
-    public String preview() { return preview; }
+    public String preview() { return "PENDING".equals(status) ? InstructionPolicy.wording(candidate, context) : preview; }
     public AdvisoryContextPort.Hazard context() { return context; }
     public AdvisoryContextPort.Bus bus() { return bus; }
     public AdvisoryCandidate candidate() { return candidate; }

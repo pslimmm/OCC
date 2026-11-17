@@ -9,7 +9,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { PagedCollectionControls } from '@/components/PagedCollectionControls'
-import { ApiError, apiRequest, type Advisory, type AdvisoryGroup, type AdvisoryCandidate, type CaptainInstruction, type Hazard, type ManagedNotice, type NoticeSuggestion, type PageResult, type PlanningHazardHistory, type TrafficIncident } from '@/lib/api'
+import { ApiError, apiRequest, fetchHazardPage, type Advisory, type AdvisoryGroup, type AdvisoryCandidate, type CaptainInstruction, type Hazard, type ManagedNotice, type NoticeSuggestion, type PageResult, type PlanningHazardHistory, type TrafficIncident } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { validCoord } from '@/pages/ControllerViews'
 import { signOut } from '@/lib/auth'
@@ -17,9 +17,10 @@ import { dataClassificationLabel } from '@/lib/presentation'
 import { formatSgtDateTime, sgtDateTimeInputFromUtc, sgtDateTimeInputToUtc } from '@/lib/time'
 import { usePagedCollection } from '@/lib/paged-collection'
 
+export type AdvisoryMapContext = Pick<AdvisoryGroup, 'serviceId' | 'directionId' | 'hazardLocation' | 'affectedStopName' | 'affectedStopCode'>
+
 type Edit = { advisory: Advisory; type: AdvisoryCandidate['type']; stopSequence: string; speed: string; minutes: string; count: string; rationale: string; replacement: string }
 type Draft = { id: string; previousId?: string; disruptionId: string; title: string; message: string; services: string; locations: string; from: string; until: string }
-type HazardPageResponse = Omit<PageResult<Hazard>, 'totalItems' | 'totalPages'> & { size: number; totalElements: number }
 
 function getHazardBadgeInfo(kind?: string, title?: string) {
   const k = (kind || '').toUpperCase()
@@ -61,17 +62,18 @@ function getHazardBadgeInfo(kind?: string, title?: string) {
 
 const instructionLabels = { BE_CAUTIOUS: 'Be cautious', REDUCE_SPEED: 'Reduce speed', SLOW_DOWN_NEAR_STOPS: 'Slow down near stops', HOLD: 'Hold', DWELL_ADJUSTMENT: 'Adjust dwell', SKIP_STOP: 'Skip stop' }
 
-export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPendingChange, onRefreshTimeChange, view, selectedHazardId, onLocateHazard, trafficIncidents, dismissedAlertIds, onDismissAlert, onAcknowledgeAllIncidents }: {
+export function ControllerAdvisories({ token, registerRefresh, registerLocateHazardInList, onRefresh, onPendingChange, onRefreshTimeChange, view, selectedHazardId, onLocateHazard, trafficIncidents, dismissedAlertIds, onDismissAlert, onAcknowledgeAllIncidents }: {
   token: string; registerRefresh: (callback: (signal: AbortSignal) => Promise<void>) => void
+  registerLocateHazardInList?: (callback: (hazardId: string) => void) => void
   onRefresh: () => void; onPendingChange: (pending: boolean) => void
   onRefreshTimeChange: (at: string | null) => void
   view: 'hazards' | 'planning' | 'notices' | 'audit'
   selectedHazardId?: string | null
-  onLocateHazard?: (hazardId: string, lat: number, lon: number, hazard: Hazard) => void
+  onLocateHazard?: (hazardId: string, lat: number, lon: number, hazard: Hazard, context?: AdvisoryMapContext) => void
   trafficIncidents?: TrafficIncident[]
   dismissedAlertIds?: Set<string>
   onDismissAlert?: (id: string) => void
-  onAcknowledgeAllIncidents?: () => void
+  onAcknowledgeAllIncidents?: (ids: string[]) => void
 }) {
   const [actionError, setActionError] = useState('')
   const [pending, setPending] = useState(false)
@@ -85,18 +87,17 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
   const [noticeSaving, setNoticeSaving] = useState(false)
   const [noticeNow, setNoticeNow] = useState(Date.now)
   const [kind, setKind] = useState('')
+  const [hazardLocation, setHazardLocation] = useState<{ hazard: Hazard | null; error?: string } | null>(null)
+  const locateRequest = useRef<AbortController | null>(null)
+  const sectionRef = useRef<HTMLElement>(null)
   const action = useRef<AbortController | null>(null)
   const hazardsEnabled = view === 'hazards' || edit !== null || draft !== null
 
   const collectionKey = token
   const hazardKind = view === 'hazards' ? kind : ''
   const hazards = usePagedCollection<Hazard, PageResult<Hazard>>(`${collectionKey}:${hazardKind}`, async (page, signal) => {
-    const params = new URLSearchParams({ page: String(page), size: '100' })
-    if (hazardKind) params.set('kind', hazardKind)
     try {
-      const result = await apiRequest<HazardPageResponse>(`/api/v1/disruption/hazards?${params}`, token, signal)
-      if (!result) throw new Error('Hazard response was empty.')
-      return { ...result, totalItems: result.totalElements, totalPages: Math.ceil(result.totalElements / result.size) }
+      return await fetchHazardPage(page, token, signal, hazardKind)
     } catch (failure) {
       if (failure instanceof ApiError && failure.status === 401 && !signal.aborted) void signOut(failure.message)
       throw failure
@@ -148,6 +149,44 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
   }, request => request.requestId, view === 'audit')
   const { items: hazardItems, hasMore: hazardHasMore, isLoading: hazardsLoading, isLoadingMore: hazardsLoadingMore,
     error: hazardError, loadNext: loadNextHazard } = hazards
+
+  useEffect(() => {
+    if (view !== 'hazards' || !registerLocateHazardInList) return
+    registerLocateHazardInList(async id => {
+      locateRequest.current?.abort()
+      const listed = hazardItems.find(hazard => hazard.disruptionId === id)
+      if (listed) {
+        setHazardLocation({ hazard: listed })
+        return
+      }
+
+      sectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      const controller = new AbortController()
+      locateRequest.current = controller
+      setHazardLocation({ hazard: null })
+      try {
+        const hazard = await apiRequest<Hazard>(`/api/v1/disruption/hazards/${encodeURIComponent(id)}`, token, controller.signal)
+        if (controller.signal.aborted) return
+        if (!hazard) throw new Error('No hazard details returned')
+        setKind('')
+        setHazardLocation({ hazard })
+      } catch (failure) {
+        if (controller.signal.aborted) return
+        if (failure instanceof ApiError && failure.status === 401) { void signOut(failure.message); return }
+        const missing = failure instanceof ApiError && failure.status === 404
+        setHazardLocation({ hazard: null, error: missing ? 'This map hazard is unavailable in the list.' : 'Unable to locate this hazard in the list. Try again from the map.' })
+      }
+    })
+    return () => registerLocateHazardInList(() => {})
+  }, [hazardItems, registerLocateHazardInList, token, view])
+  useEffect(() => () => locateRequest.current?.abort(), [])
+
+  useEffect(() => {
+    if (!hazardLocation?.hazard) return
+    const card = document.getElementById(`hazard-${hazardLocation.hazard.disruptionId}`)
+    card?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    card?.focus({ preventScroll: true })
+  }, [hazardLocation])
 
   useEffect(() => {
     if (!edit || hazardItems.some(hazard => hazard.disruptionId === edit.advisory.disruptionId) ||
@@ -285,7 +324,18 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
     } finally { if (!controller.signal.aborted) setPending(false) }
   }
   const pendingAdvisories = advisories.items
-  return <section aria-label={view === 'notices' ? 'Public notice management' : 'Multi-hazard advisories'} className={view === 'notices' ? 'space-y-5' : 'space-y-5 border-t pt-6'}>
+  const currentReview = groupReview && pendingAdvisories.find(group => group.id === groupReview.id)
+  const reviewRecipientsChanged = groupReview !== null && (!currentReview || currentReview.members.length !== groupReview.members.length ||
+    groupReview.members.some(member => !currentReview.members.some(current => current.id === member.id)))
+  const locatedHazard = hazardLocation?.hazard
+  const listedHazards = locatedHazard && !hazardItems.some(hazard => hazard.disruptionId === locatedHazard.disruptionId)
+    ? [locatedHazard, ...hazardItems] : hazardItems
+  const hazardCards = listedHazards.map(hazard => {
+    const matchedTraffic = trafficIncidents?.find(incident => incident.disruptionId === hazard.disruptionId || incident.id === hazard.disruptionId)
+    const isAcknowledged = Boolean(dismissedAlertIds?.has(hazard.disruptionId) || (matchedTraffic && dismissedAlertIds?.has(matchedTraffic.id)))
+    return { hazard, matchedTraffic, isAcknowledged }
+  })
+  return <section ref={sectionRef} aria-label={view === 'notices' ? 'Public notice management' : 'Multi-hazard advisories'} className={view === 'notices' ? 'space-y-5' : 'scroll-mt-20 space-y-5 border-t pt-6'}>
     <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-xl font-semibold">{view === 'hazards' ? 'Multi-hazard conditions' : view === 'audit' ? 'Instruction and notice history' : view === 'notices' ? 'Managed notices' : 'Captain advisories'}</h2>
       {view === 'notices' && <div className="flex flex-wrap gap-2"><Button asChild variant="outline"><Link to="/notices" target="_blank" rel="noreferrer">Public notice board</Link></Button>
         <Button variant="outline" disabled={pending} onClick={() => openDraft({ id: crypto.randomUUID(), disruptionId: '', title: '', message: '', services: '', locations: '', from: '', until: '' })}>Draft notice</Button></div>}</div>
@@ -294,20 +344,22 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="max-w-xs space-y-2">
           <Label htmlFor="hazard-kind">Hazard type</Label>
-          <select id="hazard-kind" value={kind} onChange={e => setKind(e.target.value)} className="h-9 w-full rounded-md border bg-background px-3 text-sm">
+          <select id="hazard-kind" value={kind} onChange={e => {
+            locateRequest.current?.abort()
+            setHazardLocation(null)
+            setKind(e.target.value)
+          }} className="h-9 w-full rounded-md border bg-background px-3 text-sm">
             <option value="">All types</option>
             {[['TRAFFIC_INCIDENT', 'Traffic Incidents'], ['FLOOD', 'Floods'], ['RAIL_DISRUPTION', 'Rail Disruptions'], ['ROADWORKS', 'Roadworks']].map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
         </div>
-        {onAcknowledgeAllIncidents && hazards.items.some(h => {
-          const matched = trafficIncidents?.find(t => t.disruptionId === h.disruptionId || t.id === h.disruptionId)
-          return !dismissedAlertIds?.has(h.disruptionId) && (!matched || !dismissedAlertIds?.has(matched.id))
-        }) && (
+        {onAcknowledgeAllIncidents && hazardCards.some(card => !card.isAcknowledged) && (
           <Button
             variant="outline"
             size="sm"
             className="h-9 text-xs gap-1.5 border-rose-500/50 text-rose-900 dark:text-rose-200 hover:bg-rose-500/10"
-            onClick={onAcknowledgeAllIncidents}
+            onClick={() => onAcknowledgeAllIncidents(hazardCards.filter(card => !card.isAcknowledged).flatMap(({ hazard, matchedTraffic }) =>
+              matchedTraffic ? [hazard.disruptionId, matchedTraffic.id] : [hazard.disruptionId]))}
             title="Acknowledge all incident hazards"
           >
             <CheckCheck className="size-3.5 text-rose-600" />
@@ -315,29 +367,26 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
           </Button>
         )}
       </div>
+      {hazardLocation && !hazardLocation.hazard && (hazardLocation.error
+        ? <p role="alert" className="text-sm text-destructive">{hazardLocation.error}</p>
+        : <p role="status" className="text-sm text-muted-foreground">Finding the hazard in the list…</p>)}
       {hazards.isLoading && !hazards.latestPage && <p role="status" className="text-sm text-muted-foreground">Loading hazards…</p>}
       {hazards.error !== null && !hazards.items.length && <p role="alert" className="text-sm text-destructive">Hazards are unavailable.</p>}
-      {!hazards.isLoading && hazards.error === null && hazards.latestPage && !hazards.items.length && <p className="text-sm text-muted-foreground">{kind ? 'No hazards found for the selected type.' : 'No hazards found.'}</p>}
-      {!!hazards.items.length && <ScrollArea role="region" aria-label="Hazard conditions" tabIndex={0} className="h-[32rem] rounded-lg border"
+      {!hazards.isLoading && hazards.error === null && hazards.latestPage && !listedHazards.length && <p className="text-sm text-muted-foreground">{kind ? 'No hazards found for the selected type.' : 'No hazards found.'}</p>}
+      {!!hazardCards.length && <ScrollArea role="region" aria-label="Hazard conditions" tabIndex={0} className="h-[32rem] rounded-lg border"
         viewportProps={{ onScroll: hazards.onScroll }}>
-        <div className="space-y-3 p-1 pr-3.5">{hazards.items.map(h => {
+        <div className="space-y-3 p-1 pr-3.5">{hazardCards.map(({ hazard: h, matchedTraffic, isAcknowledged }) => {
           const explicitLoc = h.facts.locations?.find(l => typeof l.latitude === 'number' && typeof l.longitude === 'number' && validCoord(l.latitude, l.longitude))
-          const matchedTraffic = !explicitLoc && trafficIncidents
-            ? trafficIncidents.find(t => t.disruptionId === h.disruptionId || t.id === h.disruptionId)
-            : undefined
           const lat = explicitLoc?.latitude ?? matchedTraffic?.latitude ?? null
           const lon = explicitLoc?.longitude ?? matchedTraffic?.longitude ?? null
           const hasCoords = typeof lat === 'number' && typeof lon === 'number' && validCoord(lat, lon)
           const isSelected = selectedHazardId === h.disruptionId || (matchedTraffic && selectedHazardId === matchedTraffic.id)
-          const isAcknowledged = Boolean(
-            dismissedAlertIds?.has(h.disruptionId) ||
-            (matchedTraffic && dismissedAlertIds?.has(matchedTraffic.id))
-          )
 
           return (
             <Card
               key={h.disruptionId}
               id={`hazard-${h.disruptionId}`}
+              tabIndex={-1}
               className={cn("min-h-28 transition-all", isSelected && "ring-2 ring-amber-500 bg-amber-500/5 shadow-md")}
             >
               <CardContent className="space-y-3">
@@ -480,10 +529,10 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
                           classification: group.hazardClassification,
                           facts: { title: group.hazardTitle, description: group.hazardDescription || group.hazardTitle, instruction: null, effectiveUntil: null },
                           kind: group.hazardKind || 'TRAFFIC_INCIDENT',
-                          updatedAt: new Date().toISOString(),
+                          updatedAt: '',
                           exposures: [],
                           limitations: []
-                        })}
+                        }, group)}
                       >
                         <MapPin className="size-3 text-amber-600" />
                         {isSelected ? 'Focused on map' : 'Locate hazard on map'}
@@ -507,12 +556,12 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
                 </div>
 
                 {/* Proposed Directive & Message */}
-                <div className="space-y-1.5">
+                {group.candidate && group.preview ? <div className="space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Proposed Directive ({instructionLabels[group.candidate.type]})</span>
                   </div>
                   <p className="text-sm font-medium bg-background border rounded-md p-2.5 leading-relaxed">{group.preview}</p>
-                </div>
+                </div> : <p className="text-sm text-muted-foreground">Review the proposed instruction for each bus.</p>}
 
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <Button disabled={pending} aria-label="Review and send to affected captains" onClick={() => { setActionError(''); setGroupReview(group) }}>
@@ -526,6 +575,7 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
                   </summary>
                   <div className="space-y-3 pt-1">{group.members.map(a => <div key={a.id} className="space-y-2 rounded-lg border p-3">
                     <p className="font-medium text-sm">{a.busId}</p>
+                    {!group.candidate && <p className="text-sm">{a.preview}</p>}
                     <p className="text-xs text-muted-foreground">{a.candidate.rationale}</p>
                     <div className="flex flex-wrap gap-2">
                       <Button variant="outline" size="sm" disabled={pending} onClick={() => void submit(`/api/v1/planning/advisories/${a.id}/decisions`, {})}>Send to this bus</Button>
@@ -566,17 +616,37 @@ export function ControllerAdvisories({ token, registerRefresh, onRefresh, onPend
                 <span>Disruption ID: <code className="text-[10px] font-mono">{groupReview.disruptionId.slice(0, 8)}…</code></span>
               </div>
             </div>
-            <p className="text-xs text-muted-foreground font-medium">Simulation delivery · Directive: {instructionLabels[groupReview.candidate.type]}</p>
-            <p className="rounded-lg border bg-background p-3 text-sm font-medium leading-relaxed">{groupReview.preview}</p>
+            {groupReview.candidate && groupReview.preview && <>
+              <p className="text-xs text-muted-foreground font-medium">Simulation delivery · Directive: {instructionLabels[groupReview.candidate.type]}</p>
+              <p className="rounded-lg border bg-background p-3 text-sm font-medium leading-relaxed">{groupReview.preview}</p>
+            </>}
           </div>
-          <ScrollArea className="max-h-64 rounded-lg border" tabIndex={0} aria-label="Broadcast recipients"><ul className="divide-y">{groupReview.members.map(member => <li key={member.id} className="px-3 py-2 text-sm">{member.busId}</li>)}</ul></ScrollArea>
-          {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
+          <ScrollArea className="max-h-64 rounded-lg border" tabIndex={0} aria-label="Broadcast recipients">
+            <ul className="divide-y">{groupReview.members.map(member => {
+              const conflict = groupReview.movementConflicts?.find(value => value.proposalId === member.id)
+              return <li key={member.id} className="px-3 py-2 text-sm">
+                <p className="font-medium">{member.busId}</p>
+                {!groupReview.candidate && <p className="mt-1">{member.preview}</p>}
+                {conflict && <p className="mt-1 text-muted-foreground">Active instruction to replace · {conflict.message}</p>}
+              </li>
+            })}</ul>
+          </ScrollArea>
+          {!!groupReview.movementConflicts?.length && <p className="text-sm">
+            Sending replaces the active instructions listed above and sends the new advisory to every bus in this group.
+          </p>}
+          {(actionError || reviewRecipientsChanged) && <p role="alert" className="text-sm text-destructive">
+            {actionError || 'Recipients have changed. Close this review and check the current advisory.'}
+          </p>}
           <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={pending} onClick={() => setGroupReview(null)}>Cancel</Button>
-            <Button disabled={pending} onClick={() => {
-              if (pending) return
-              void submit('/api/v1/planning/advisory-groups/decisions', { proposalIds: groupReview.members.map(member => member.id) })
+            <Button disabled={pending || reviewRecipientsChanged} onClick={() => {
+              if (pending || reviewRecipientsChanged) return
+              const conflicts = groupReview.movementConflicts ?? []
+              void submit('/api/v1/planning/advisory-groups/decisions', {
+                proposalIds: groupReview.members.map(member => member.id),
+                ...(conflicts.length && { replacements: Object.fromEntries(conflicts.map(value => [value.proposalId, value.instructionId])) }),
+              })
                 .then(saved => { if (saved) setGroupReview(null) })
-            }}>{pending ? 'Sending…' : 'Approve and send group'}</Button></div>
+            }}>{pending ? 'Sending…' : groupReview.movementConflicts?.length ? 'Replace and send group' : 'Approve and send group'}</Button></div>
         </DialogContent>}
       </Dialog>
       {edit && <Card><CardContent><form className="space-y-4" onSubmit={event => {

@@ -23,7 +23,8 @@ public class DemoRoutePositionsController {
     public DemoRoutePositionsController(DemoRoutePositionService positions) { this.positions = positions; }
 
     @GetMapping
-    @Operation(operationId = "getDemoRoutePositions", summary = "Get the fictional fleet positions for a simulation run")
+    @Operation(operationId = "getDemoRoutePositions", summary = "Get the fictional fleet positions for a simulation run",
+            description = "Buses continue moving after the replay data finishes and restart at the origin after reaching the terminus. Positions are available while the simulation remains active.")
     @ApiResponse(responseCode = "200", description = "Simulation route positions returned")
     public RoutePositionsResponse positions(@PathVariable UUID demoRunId) {
         var snapshot = positions.positions(demoRunId);

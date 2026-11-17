@@ -7,6 +7,8 @@ import com.csd.occ.disruption.bunching.domain.PlanningEventSubmissionPort;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.LinkedHashMap;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -44,10 +46,12 @@ public class HazardReassessmentService {
             var page = reads.list(null, pageNumber, PAGE_SIZE);
             for (var hazard : page.items()) {
                 if (!"ACTIVE".equals(hazard.status()) || hazard.sourceObservationId() == null) continue;
-                var progressByBus = new LinkedHashMap<String, Integer>();
+                var affectedStopsByBus = new LinkedHashMap<String, SortedSet<String>>();
                 for (var exposure : hazard.exposures())
-                    progressByBus.putIfAbsent(exposure.busId(), exposure.busProgressSequence());
-                for (var entry : progressByBus.entrySet())
+                    affectedStopsByBus.computeIfAbsent(exposure.busId(), bus -> new TreeSet<>())
+                            .add(exposure.serviceId() + "/" + exposure.directionId() + "/"
+                                    + exposure.stopSequence() + "/" + exposure.stopCode());
+                for (var entry : affectedStopsByBus.entrySet())
                     if (enqueue(hazard, selected.demoRunId(), entry.getKey(), entry.getValue())) queued++;
             }
             if ((long) (pageNumber + 1) * PAGE_SIZE >= page.totalElements()) break;
@@ -55,12 +59,12 @@ public class HazardReassessmentService {
         return queued;
     }
 
-    private boolean enqueue(HazardReadService.View hazard, UUID runId, String busId, int progressSequence) {
+    private boolean enqueue(HazardReadService.View hazard, UUID runId, String busId, SortedSet<String> affectedStops) {
         return transactions.execute(status -> {
             String revisionKey = hazard.sourceRevision() == null
                     ? "observation:" + hazard.sourceObservationId() : "revision:" + hazard.sourceRevision();
-            String identity = "hazard-reassessment-v1:" + hazard.disruptionId() + ":" + revisionKey + ":"
-                    + runId + ":" + busId + ":" + progressSequence;
+            String identity = "hazard-reassessment-v2:" + hazard.disruptionId() + ":" + revisionKey + ":"
+                    + runId + ":" + busId + ":" + String.join(",", affectedStops);
             UUID eventId = UUID.nameUUIDFromBytes(identity.getBytes(StandardCharsets.UTF_8));
             if (hazards.eventExists(eventId) || outbox.findByEventId(eventId).isPresent()) return false;
 
