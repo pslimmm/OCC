@@ -88,6 +88,19 @@ http {
                 assert re.fullmatch(r"[0-9a-f]{32}", fields[5]), fields
                 assert fields[6:] == ["", ""], fields
                 print(f"PASS proxy method, path, query and trusted headers: {method} {path}")
+            # Per-service API docs reuse the page and contract each service
+            # already packages; each path must reach the owning service.
+            for path, port, upstream_path in (
+                ("/api-docs/v1/ingestion", "18001", "/swagger-ui/index.html"),
+                ("/api-docs/v1/planning/", "18003", "/swagger-ui/index.html"),
+                ("/api-docs/v1/disruption/v3/disruption.json", "18002", "/v3/disruption.json"),
+                ("/api-docs/v1/ingestion/webjars/swagger-ui/5.32.14/swagger-ui.css",
+                 "18001", "/webjars/swagger-ui/5.32.14/swagger-ui.css"),
+            ):
+                with urllib.request.urlopen(base + path, timeout=5) as response:
+                    fields = response.read().decode().split("|")
+                assert fields[0] == port and fields[2] == upstream_path, fields
+                print(f"PASS API docs route: {path} -> {port}{upstream_path}")
         except Exception:
             subprocess.run(["docker", "logs", name], check=False)
             raise

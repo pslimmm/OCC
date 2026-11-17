@@ -166,6 +166,46 @@
         proxy_pass $occ_ingestion_upstream;
     }
 
+    # Per-service Swagger UI. Each service already packages the shared page and
+    # its committed contract; the page's absolute asset and spec URLs are
+    # rewritten here so only /api-docs/ has to be reachable at the edge.
+    location ^~ /api-docs/v1/ingestion {
+        limit_req zone=occ_api burst=40 nodelay;
+        limit_req_status 429;
+        # sub_filter needs an unencoded body; Spring does not compress today.
+        proxy_set_header Accept-Encoding "";
+        sub_filter_once off;
+        sub_filter '/webjars/' '/api-docs/v1/ingestion/webjars/';
+        sub_filter '/v3/ingestion.json' '/api-docs/v1/ingestion/v3/ingestion.json';
+        rewrite ^/api-docs/v1/ingestion/?$ /swagger-ui/index.html break;
+        rewrite ^/api-docs/v1/ingestion/(.*)$ /$1 break;
+        proxy_pass $occ_ingestion_upstream;
+    }
+
+    location ^~ /api-docs/v1/disruption {
+        limit_req zone=occ_api burst=40 nodelay;
+        limit_req_status 429;
+        proxy_set_header Accept-Encoding "";
+        sub_filter_once off;
+        sub_filter '/webjars/' '/api-docs/v1/disruption/webjars/';
+        sub_filter '/v3/disruption.json' '/api-docs/v1/disruption/v3/disruption.json';
+        rewrite ^/api-docs/v1/disruption/?$ /swagger-ui/index.html break;
+        rewrite ^/api-docs/v1/disruption/(.*)$ /$1 break;
+        proxy_pass $occ_disruption_upstream;
+    }
+
+    location ^~ /api-docs/v1/planning {
+        limit_req zone=occ_api burst=40 nodelay;
+        limit_req_status 429;
+        proxy_set_header Accept-Encoding "";
+        sub_filter_once off;
+        sub_filter '/webjars/' '/api-docs/v1/planning/webjars/';
+        sub_filter '/v3/planning.json' '/api-docs/v1/planning/v3/planning.json';
+        rewrite ^/api-docs/v1/planning/?$ /swagger-ui/index.html break;
+        rewrite ^/api-docs/v1/planning/(.*)$ /$1 break;
+        proxy_pass $occ_planning_upstream;
+    }
+
     location / {
         error_page 404 /404.html;
         return 404;
