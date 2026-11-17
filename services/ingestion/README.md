@@ -355,9 +355,9 @@ replay uses its actual simulation timestamp rather than leaving the field absent
 
 The running service serves the committed contract at `/v3/ingestion.json` and the
 Swagger UI at `/swagger-ui/index.html`. springdoc is a test-only dependency, so the
-application itself generates neither. Both require an ADMIN or CONTROLLER bearer
-token, so a plain browser tab gets `401`; use a token-aware proxy or an extension
-that adds the `Authorization` header.
+application itself generates neither. These statics are anonymous so a browser can
+load them; through Nginx the page is served at `/api-docs/v1/ingestion`, and the raw
+`/v3`, `/swagger-ui` and `/webjars` paths stay at `404`.
 
 To refresh the checked-in OpenAPI contract, run the opt-in export test from the
 repository root (Docker provides the disposable PostgreSQL container). It writes

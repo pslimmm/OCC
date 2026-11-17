@@ -167,42 +167,136 @@
     }
 
     # Per-service Swagger UI. Each service already packages the shared page and
-    # its committed contract; the page's absolute asset and spec URLs are
-    # rewritten here so only /api-docs/ has to be reachable at the edge.
-    location ^~ /api-docs/v1/ingestion {
+    # its committed contract, so the edge exposes exactly those two plus the
+    # webjar assets under /api-docs/v1/<service>/. Any other path in that
+    # namespace falls through to the 404 below: a docs URL is not a proxy.
+    #
+    # Declaring proxy_set_header inside a location resets inheritance, so the
+    # shared trusted-header policy above is repeated in each page block.
+    location = /api-docs/v1/ingestion {
+        return 301 /api-docs/v1/ingestion/;
+    }
+
+    location = /api-docs/v1/ingestion/ {
         limit_req zone=occ_api burst=40 nodelay;
         limit_req_status 429;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Idempotency-Key $http_idempotency_key;
+        proxy_set_header X-Correlation-ID $request_id;
+        proxy_set_header X-Real-IP $occ_client_ip;
+        proxy_set_header X-Forwarded-For $occ_client_ip;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $occ_forwarded_proto;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-OCC-Peer-Token "";
+        proxy_set_header X-OCC-Origin-Secret "";
         # sub_filter needs an unencoded body; Spring does not compress today.
         proxy_set_header Accept-Encoding "";
         sub_filter_once off;
         sub_filter '/webjars/' '/api-docs/v1/ingestion/webjars/';
         sub_filter '/v3/ingestion.json' '/api-docs/v1/ingestion/v3/ingestion.json';
-        rewrite ^/api-docs/v1/ingestion/?$ /swagger-ui/index.html break;
-        rewrite ^/api-docs/v1/ingestion/(.*)$ /$1 break;
+        rewrite ^ /swagger-ui/index.html break;
         proxy_pass $occ_ingestion_upstream;
     }
 
-    location ^~ /api-docs/v1/disruption {
+    location ^~ /api-docs/v1/ingestion/webjars/ {
         limit_req zone=occ_api burst=40 nodelay;
         limit_req_status 429;
+        rewrite ^/api-docs/v1/ingestion(/webjars/.*)$ $1 break;
+        proxy_pass $occ_ingestion_upstream;
+    }
+
+    location = /api-docs/v1/ingestion/v3/ingestion.json {
+        limit_req zone=occ_api burst=40 nodelay;
+        limit_req_status 429;
+        rewrite ^ /v3/ingestion.json break;
+        proxy_pass $occ_ingestion_upstream;
+    }
+
+    location = /api-docs/v1/disruption {
+        return 301 /api-docs/v1/disruption/;
+    }
+
+    location = /api-docs/v1/disruption/ {
+        limit_req zone=occ_api burst=40 nodelay;
+        limit_req_status 429;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Idempotency-Key $http_idempotency_key;
+        proxy_set_header X-Correlation-ID $request_id;
+        proxy_set_header X-Real-IP $occ_client_ip;
+        proxy_set_header X-Forwarded-For $occ_client_ip;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $occ_forwarded_proto;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-OCC-Peer-Token "";
+        proxy_set_header X-OCC-Origin-Secret "";
         proxy_set_header Accept-Encoding "";
         sub_filter_once off;
         sub_filter '/webjars/' '/api-docs/v1/disruption/webjars/';
         sub_filter '/v3/disruption.json' '/api-docs/v1/disruption/v3/disruption.json';
-        rewrite ^/api-docs/v1/disruption/?$ /swagger-ui/index.html break;
-        rewrite ^/api-docs/v1/disruption/(.*)$ /$1 break;
+        rewrite ^ /swagger-ui/index.html break;
         proxy_pass $occ_disruption_upstream;
     }
 
-    location ^~ /api-docs/v1/planning {
+    location ^~ /api-docs/v1/disruption/webjars/ {
         limit_req zone=occ_api burst=40 nodelay;
         limit_req_status 429;
+        rewrite ^/api-docs/v1/disruption(/webjars/.*)$ $1 break;
+        proxy_pass $occ_disruption_upstream;
+    }
+
+    location = /api-docs/v1/disruption/v3/disruption.json {
+        limit_req zone=occ_api burst=40 nodelay;
+        limit_req_status 429;
+        rewrite ^ /v3/disruption.json break;
+        proxy_pass $occ_disruption_upstream;
+    }
+
+    location = /api-docs/v1/planning {
+        return 301 /api-docs/v1/planning/;
+    }
+
+    location = /api-docs/v1/planning/ {
+        limit_req zone=occ_api burst=40 nodelay;
+        limit_req_status 429;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Idempotency-Key $http_idempotency_key;
+        proxy_set_header X-Correlation-ID $request_id;
+        proxy_set_header X-Real-IP $occ_client_ip;
+        proxy_set_header X-Forwarded-For $occ_client_ip;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $occ_forwarded_proto;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-OCC-Peer-Token "";
+        proxy_set_header X-OCC-Origin-Secret "";
         proxy_set_header Accept-Encoding "";
         sub_filter_once off;
         sub_filter '/webjars/' '/api-docs/v1/planning/webjars/';
         sub_filter '/v3/planning.json' '/api-docs/v1/planning/v3/planning.json';
-        rewrite ^/api-docs/v1/planning/?$ /swagger-ui/index.html break;
-        rewrite ^/api-docs/v1/planning/(.*)$ /$1 break;
+        rewrite ^ /swagger-ui/index.html break;
+        proxy_pass $occ_planning_upstream;
+    }
+
+    location ^~ /api-docs/v1/planning/webjars/ {
+        limit_req zone=occ_api burst=40 nodelay;
+        limit_req_status 429;
+        rewrite ^/api-docs/v1/planning(/webjars/.*)$ $1 break;
+        proxy_pass $occ_planning_upstream;
+    }
+
+    location = /api-docs/v1/planning/v3/planning.json {
+        limit_req zone=occ_api burst=40 nodelay;
+        limit_req_status 429;
+        rewrite ^ /v3/planning.json break;
         proxy_pass $occ_planning_upstream;
     }
 

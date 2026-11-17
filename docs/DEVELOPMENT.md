@@ -420,7 +420,7 @@ These are the default local addresses; use the configured ports if changed in `.
 | --- | --- | --- | --- |
 | React app | [http://localhost/login](http://localhost/login) | Sign-in and exclusive controller/captain pages | Verified CONTROLLER or CAPTAIN role for its corresponding page |
 | Nginx public API | `http://localhost/api/v1/...` | Main entry point for application API requests | ADMIN/CONTROLLER bearer token for existing operational APIs |
-| API docs | `http://localhost/api-docs/v1/ingestion`, `/planning`, `/disruption` | Browser Swagger UI for each service's committed contract | Public page; operations still need a token |
+| API docs | `http://localhost/api-docs/v1/ingestion`, `/planning`, `/disruption` | Browser Swagger UI for each service's committed contract | Public page; each operation keeps its documented role |
 | Ingestion | [http://localhost:6767](http://localhost:6767) | Direct arrival, reference-data and demo API access | Local loopback only; not published in production; operational APIs require ADMIN/CONTROLLER |
 | Disruption | [http://localhost:6768](http://localhost:6768) | Direct bunching and traffic-disruption API access | Local loopback only; not published in production; operational APIs require ADMIN/CONTROLLER |
 | Planning | [http://localhost:6769](http://localhost:6769) | Direct diagnosis and recommendation API access | Local loopback only; not published in production; operational APIs require ADMIN/CONTROLLER |
