@@ -55,7 +55,7 @@ public class DisruptionSecurityConfig {
                         .hasAnyRole("ADMIN", "CONTROLLER")
                         .requestMatchers("/api/v1/**").denyAll()
                         .requestMatchers("/v3/**", "/swagger-ui/**", "/swagger-ui.html", "/webjars/**")
-                        .hasAnyRole("ADMIN", "CONTROLLER")
+                        .permitAll()
                         .anyRequest().denyAll())
                 .exceptionHandling(errors -> errors.authenticationEntryPoint(auditEntryPoint)
                         .accessDeniedHandler(auditDeniedHandler))

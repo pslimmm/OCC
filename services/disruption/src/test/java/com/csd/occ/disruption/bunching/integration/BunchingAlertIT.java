@@ -88,6 +88,15 @@ class BunchingAlertIT {
     }
 
     @Test
+    void servesTheStaticContractAndSwaggerUiAnonymously() throws Exception {
+        // The edge docs page cannot carry a bearer token, so the docs statics are public.
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/swagger-ui/index.html"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/v3/disruption.json"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+    }
+
+    @Test
     void servesTheStaticContractAndSwaggerUi() throws Exception {
         var admin = org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt()
                 .authorities(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_ADMIN"));
