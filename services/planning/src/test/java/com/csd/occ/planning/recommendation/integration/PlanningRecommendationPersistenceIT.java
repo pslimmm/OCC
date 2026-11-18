@@ -239,15 +239,12 @@ class PlanningRecommendationPersistenceIT {
     }
 
     @Test
-    void servesTheCommittedContractToControllersButNotCaptains() throws Exception {
-        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/v3/planning.json")
-                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt()
-                                .authorities(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_ADMIN"))))
+    void servesTheCommittedContractAndUiAnonymously() throws Exception {
+        // The edge docs page cannot carry a bearer token, so the docs statics are public.
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/v3/planning.json"))
                 .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
-        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/v3/planning.json")
-                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt()
-                                .authorities(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_CAPTAIN"))))
-                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isForbidden());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/swagger-ui/index.html"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
     }
 
     @BeforeEach

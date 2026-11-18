@@ -93,7 +93,7 @@ public class PlanningSecurityConfig {
                         .hasRole("CONTROLLER")
                         .requestMatchers("/api/v1/**").denyAll()
                         .requestMatchers("/v3/**", "/swagger-ui/**", "/swagger-ui.html", "/webjars/**")
-                        .hasAnyRole("ADMIN", "CONTROLLER")
+                        .permitAll()
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(resourceServer -> resourceServer
                         .authenticationEntryPoint(authenticationEntryPoint)

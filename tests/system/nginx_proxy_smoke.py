@@ -22,7 +22,8 @@ def main() -> None:
     upstreams = "\n".join(
         f"server {{ listen {port}; location / {{ return 200 "
         "'$server_port|$request_method|$request_uri|$http_authorization|"
-        "$http_idempotency_key|$http_x_correlation_id|$http_x_occ_peer_token|$http_forwarded'; } }"
+        "$http_idempotency_key|$http_x_correlation_id|$http_x_occ_peer_token|$http_forwarded|"
+        "$http_x_occ_origin_secret'; } }"
         for port in (18001, 18002, 18003)
     )
     config = """pid /tmp/nginx.pid;
@@ -86,8 +87,28 @@ http {
                     fields = response.read().decode().split("|")
                 assert fields[:5] == [port, method, upstream_path, "Bearer synthetic-proxy-test", "synthetic-request"], fields
                 assert re.fullmatch(r"[0-9a-f]{32}", fields[5]), fields
-                assert fields[6:] == ["", ""], fields
+                assert fields[6:] == ["", "", ""], fields
                 print(f"PASS proxy method, path, query and trusted headers: {method} {path}")
+            # Per-service API docs reuse the page and contract each service
+            # already packages; each path must reach the owning service with the
+            # same trusted-header policy as every other proxied route.
+            for path, port, upstream_path in (
+                ("/api-docs/v1/ingestion/", "18001", "/swagger-ui/index.html"),
+                ("/api-docs/v1/planning/", "18003", "/swagger-ui/index.html"),
+                ("/api-docs/v1/disruption/v3/disruption.json", "18002", "/v3/disruption.json"),
+                ("/api-docs/v1/ingestion/webjars/swagger-ui/5.32.14/swagger-ui.css",
+                 "18001", "/webjars/swagger-ui/5.32.14/swagger-ui.css"),
+            ):
+                request = urllib.request.Request(base + path, headers={
+                    "Authorization": "Bearer synthetic-proxy-test", "Idempotency-Key": "synthetic-request",
+                    "X-Correlation-ID": "client-spoof", "X-OCC-Peer-Token": "client-spoof",
+                    "X-OCC-Origin-Secret": "client-spoof", "Forwarded": "for=client-spoof"})
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    fields = response.read().decode().split("|")
+                assert fields[:5] == [port, "GET", upstream_path, "Bearer synthetic-proxy-test", "synthetic-request"], fields
+                assert re.fullmatch(r"[0-9a-f]{32}", fields[5]), fields
+                assert fields[6:] == ["", "", ""], fields
+                print(f"PASS API docs route: {path} -> {port}{upstream_path}")
         except Exception:
             subprocess.run(["docker", "logs", name], check=False)
             raise

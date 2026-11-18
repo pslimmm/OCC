@@ -638,6 +638,13 @@ class IngestionStartupIT {
     }
 
     @Test
+    void servesTheStaticContractAndSwaggerUiAnonymously() throws Exception {
+        // The edge docs page cannot carry a bearer token, so the docs statics are public.
+        mvc.perform(get("/swagger-ui/index.html")).andExpect(status().isOk());
+        mvc.perform(get("/v3/ingestion.json")).andExpect(status().isOk());
+    }
+
+    @Test
     @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "occ.exportOpenapi", matches = "true")
     void exportsGeneratedIngestionContract() throws Exception {
         // The absolute URL reproduces the committed server URL that the runtime contract check expects.

@@ -420,6 +420,7 @@ These are the default local addresses; use the configured ports if changed in `.
 | --- | --- | --- | --- |
 | React app | [http://localhost/login](http://localhost/login) | Sign-in and exclusive controller/captain pages | Verified CONTROLLER or CAPTAIN role for its corresponding page |
 | Nginx public API | `http://localhost/api/v1/...` | Main entry point for application API requests | ADMIN/CONTROLLER bearer token for existing operational APIs |
+| API docs | `http://localhost/api-docs/v1/ingestion`, `/planning`, `/disruption` | Browser Swagger UI for each service's committed contract | Public page; each operation keeps its documented role |
 | Ingestion | [http://localhost:6767](http://localhost:6767) | Direct arrival, reference-data and demo API access | Local loopback only; not published in production; operational APIs require ADMIN/CONTROLLER |
 | Disruption | [http://localhost:6768](http://localhost:6768) | Direct bunching and traffic-disruption API access | Local loopback only; not published in production; operational APIs require ADMIN/CONTROLLER |
 | Planning | [http://localhost:6769](http://localhost:6769) | Direct diagnosis and recommendation API access | Local loopback only; not published in production; operational APIs require ADMIN/CONTROLLER |
@@ -439,10 +440,10 @@ ADMIN token:
 | --- | --- | --- |
 | `/internal` and `/internal/**` | `404` in local and production | Private service-to-service APIs; no public edge route |
 | `/actuator` and `/actuator/**` | `404` in local and production | Health and management access is separate from the public app |
-| `/v3/` and `/v3/**` | `404` in local and production | OpenAPI contracts are restricted to direct development service access |
-| `/swagger-ui/` and `/swagger-ui/**` | `404` in local and production | Swagger is a developer interface, not a public app page |
+| `/v3/` and `/v3/**` | `404` in local and production | OpenAPI contracts are served only through `/api-docs/v1/<service>` |
+| `/swagger-ui/` and `/swagger-ui/**` | `404` in local and production | Swagger UI is served only through `/api-docs/v1/<service>` |
 | `/swagger-ui.html` | `404` in local and production | Legacy developer path; the service redirects it only for direct access |
-| `/webjars/` and `/webjars/**` | `404` in local and production | Swagger UI assets back the developer interface only |
+| `/webjars/` and `/webjars/**` | `404` in local and production | Swagger UI assets are served only through `/api-docs/v1/<service>` |
 | `/auth-test` and `/auth-test/**` | `404` in local and production | Retired temporary authentication page |
 
 Direct backend, PostgreSQL and pgAdmin ports are not published by the

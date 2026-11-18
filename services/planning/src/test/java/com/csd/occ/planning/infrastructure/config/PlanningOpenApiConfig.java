@@ -5,9 +5,11 @@ import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
+import io.swagger.v3.oas.models.servers.Server;
 import org.springdoc.core.models.GroupedOpenApi;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import java.util.List;
 
 @Configuration(proxyBeanMethods = false)
 public class PlanningOpenApiConfig {
@@ -17,6 +19,7 @@ public class PlanningOpenApiConfig {
                 .title("OCC Planning API")
                 .version("1.0.0")
                 .description("Diagnosis and validated mitigation recommendations for operational disruptions. Operational reads require ADMIN or CONTROLLER; operational writes require CONTROLLER. Admin namespaces require ADMIN. Captain endpoints retain owner-only CAPTAIN access."))
+                .servers(List.of(new Server().url("/")))
                 .components(new Components()
                         .addSecuritySchemes("SupabaseJWT", new SecurityScheme()
                                 .type(SecurityScheme.Type.HTTP).scheme("bearer").bearerFormat("JWT"))

@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import http.client
+import json
 from pathlib import Path
+import re
 import socket
 import ssl
 import sys
@@ -180,6 +182,10 @@ def main() -> int:
         ("Swagger UI hidden", "/swagger-ui/index.html", 404, None, "GET"),
         ("legacy Swagger UI path hidden", "/swagger-ui.html", 404, None, "GET"),
         ("Swagger UI assets hidden", "/webjars/swagger-ui/", 404, None, "GET"),
+        ("API docs cannot reach management endpoints", "/api-docs/v1/ingestion/actuator/health", 404, None, "GET"),
+        ("API docs cannot reach internal APIs", "/api-docs/v1/ingestion/internal/v1/arrival-snapshots", 404, None, "GET"),
+        ("API docs namespace is not a prefix alias", "/api-docs/v1/ingestionXYZ/actuator/health", 404, None, "GET"),
+        ("unknown API docs subpath stays closed", "/api-docs/v1/planning/actuator/health", 404, None, "GET"),
         ("temporary auth harness policy", "/auth-test/index.html", 404, None, "GET"),
         ("encoded traversal to internal API blocked", "/api/v1/%2e%2e/internal/v1/arrival-snapshots", 404, None, "GET"),
         ("double-slash internal path blocked", "/internal//v1/arrival-snapshots", 404, None, "GET"),
@@ -188,6 +194,26 @@ def main() -> int:
     ]
     for label, path, expected, headers, method in cases:
         assert_status(base_url, label, path, expected, headers, method)
+
+    # The per-service docs pages reuse the page and contract each service
+    # already packages; the edge namespaces every URL they reference.
+    for service in ("ingestion", "planning", "disruption"):
+        time.sleep(0.06)
+        with open_url(base_url, f"/api-docs/v1/{service}/") as response:
+            body = response.read().decode()
+        spec = f"/api-docs/v1/{service}/v3/{service}.json"
+        if spec not in body:
+            raise AssertionError(f"{service}: API docs page was not namespaced")
+        asset = re.search(rf"/api-docs/v1/{service}/webjars/swagger-ui/[^\"]+swagger-ui-bundle\.js", body)
+        if asset is None:
+            raise AssertionError(f"{service}: API docs page has no rewritten bundle URL")
+        with open_url(base_url, spec) as response:
+            contract = json.loads(response.read())
+        if contract.get("servers") != [{"url": "/"}]:
+            raise AssertionError(f"{service}: published contract does not target the edge origin")
+        assert_status(base_url, f"{service} API docs page", f"/api-docs/v1/{service}", 200)
+        assert_status(base_url, f"{service} API docs bundle", asset.group(0), 200)
+        assert_status(base_url, f"{service} committed contract", spec, 200)
 
     if args.token_dir:
         token_dir = args.token_dir
